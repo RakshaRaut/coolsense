@@ -1,7 +1,6 @@
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
-  OnGatewayInit,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
@@ -13,6 +12,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import type { Socket, Server } from 'socket.io';
 import type { SimulationState } from './models/simulation-state.model.js';
+import { allowedOrigins } from '../common/allowed-origins.js';
 
 interface SimulationSessionPayload {
   id: string;
@@ -33,10 +33,17 @@ const userRoom = (userId: string) => `user:${userId}`;
 
 @Injectable()
 @WebSocketGateway({
-  cors: { origin: true },
+  // Checked per request: ConfigModule loads FRONTEND_URL into process.env
+  // after this decorator has been evaluated.
+  cors: {
+    origin: (
+      origin: string | undefined,
+      callback: (error: Error | null, allow?: boolean) => void,
+    ) => callback(null, !origin || allowedOrigins().includes(origin)),
+  },
 })
 export class SimulationGateway
-  implements OnGatewayInit<Server>, OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayConnection, OnGatewayDisconnect
 {
   private readonly logger = new Logger(SimulationGateway.name);
 
@@ -44,18 +51,6 @@ export class SimulationGateway
   private server?: Server;
 
   constructor(private readonly jwtService: JwtService) {}
-
-  afterInit(server: Server): void {
-    const configuredOrigins = process.env.CORS_ORIGIN;
-    if (configuredOrigins) {
-      server.engine.opts.cors = {
-        origin: configuredOrigins
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-      };
-    }
-  }
 
   async handleConnection(client: Socket): Promise<void> {
     const authToken = client.handshake.auth?.token;

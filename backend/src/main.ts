@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule, ObserveInstrument } from './app.module.js';
+import { allowedOrigins } from './common/allowed-origins.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -9,20 +10,9 @@ async function bootstrap() {
   });
 
   const config = app.get(ConfigService);
-  const configuredOrigins = config
-    .get<string>('FRONTEND_URL', '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
 
   app.enableCors({
-    origin: [
-      ...new Set([
-        ...configuredOrigins,
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-      ]),
-    ],
+    origin: allowedOrigins(config.get<string>('FRONTEND_URL', '')),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
