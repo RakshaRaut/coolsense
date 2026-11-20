@@ -8,13 +8,24 @@
    ThingsBoard synchronization is required. `THINGSBOARD_DOCKER_URL` must be
    reachable from the backend container; use `host.docker.internal` for an
    installation on the Docker host or a Compose service name for a container.
-3. Start the stack:
+3. Start the stack in the foreground, and press Ctrl+C to stop it:
 
    ```sh
-   docker compose up --build -d
-   docker compose ps
-   docker compose logs -f backend
+   ./run.sh
    ```
+
+   If the terminal was closed without a clean stop, run `./stop.sh`. Nothing
+   restarts on its own: the services have no restart policy.
+
+When `THINGSBOARD_ENABLED=true`, `run.sh` also starts ThingsBoard and its
+database from `~/Desktop/pulseGrid` (HTTP on 18080, MQTT on 11883).
+`thingsboard.override.yml` caps the JVM heap at 768 MB. `stop.sh` stops
+ThingsBoard too, including when pulseGrid itself is using it.
+
+The backend hot-reloads from the mounted `backend/src` and `backend/prisma`.
+The frontend container serves a production build, which `run.sh` rebuilds on
+each start. For frontend hot reload, run `npm run dev` in `frontend/` on the
+host (Node 22). It proxies `/api` and `/socket.io` to `localhost:3000`.
 
 The backend waits for PostgreSQL, applies pending Prisma migrations with
 `prisma migrate deploy` (without resetting the database), and then starts. The

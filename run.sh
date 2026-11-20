@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run CoolSense in the foreground. Ctrl+C or closing the terminal stops everything.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+[ -f .env ] || { echo "Missing .env: copy .env.example to .env and set JWT_SECRET" >&2; exit 1; }
+
+trap ./stop.sh EXIT
+
+# ThingsBoard needs about 1 GB of RAM, so it starts only when enabled in .env.
+if grep -q '^THINGSBOARD_ENABLED=true' .env; then
+  docker compose -p pulsegrid -f "$HOME/Desktop/pulseGrid/docker-compose.yml" \
+    -f "$PWD/thingsboard.override.yml" up -d thingsboard
+fi
+
+docker compose up --build

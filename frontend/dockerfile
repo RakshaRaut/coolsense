@@ -4,10 +4,15 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm ci
+RUN npm ci && npm cache clean --force
 
 COPY . .
 
+# Serve a production build. It needs far less memory than the dev server,
+# and the container has no source mount for hot reload anyway.
+RUN node_modules/.bin/vite build
+
 EXPOSE 5173
 
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+# preview reuses server.proxy from vite.config.ts for /api and /socket.io.
+CMD ["node_modules/.bin/vite", "preview", "--host", "0.0.0.0", "--port", "5173", "--strictPort"]

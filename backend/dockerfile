@@ -1,19 +1,22 @@
-FROM node:22-alpine AS development
+FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
+# Install as the node user so no slow `chown -R` over node_modules is needed.
+RUN chown node:node /app
+USER node
 
-RUN npm ci
+COPY --chown=node:node package*.json ./
 
-COPY . .
+RUN npm ci && npm cache clean --force
+
+# src/ is excluded by .dockerignore: docker-compose bind-mounts it.
+COPY --chown=node:node . .
 
 # Prisma loads datasource configuration during generation but does not connect.
-RUN DATABASE_URL="postgresql://coolsense_user:coolsense_password@database:5432/coolsense_db?schema=public" npx prisma generate \
-    && chown -R node:node /app
-
-USER node
+RUN DATABASE_URL="postgresql://coolsense_user:coolsense_password@database:5432/coolsense_db?schema=public" npx prisma generate
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start:dev"]
+# exec replaces the shell, and no npm wrapper stays resident (about 65 MB saved).
+CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma generate && exec node_modules/.bin/nest start --watch"]

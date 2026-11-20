@@ -1,8 +1,9 @@
+# Start with ./run.sh and stop with ./stop.sh. There are no restart policies,
+# so nothing starts on its own after a reboot or a Docker restart.
 services:
   database:
     image: postgres:16
     container_name: coolsense-db
-    restart: unless-stopped
 
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-coolsense_user}
@@ -15,11 +16,14 @@ services:
     volumes:
       - coolsense_postgres_data:/var/lib/postgresql/data
 
+    # Probe every second while starting, then only every 30s.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 5s
+      interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
 
   backend:
     build:
@@ -27,7 +31,8 @@ services:
       dockerfile: dockerfile
 
     container_name: coolsense-backend
-    restart: unless-stopped
+    # tini as PID 1: reaps processes orphaned by the nest watcher and forwards signals.
+    init: true
 
     ports:
       - "${BACKEND_PORT:-3000}:3000"
@@ -39,7 +44,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
-      CORS_ORIGIN: ${FRONTEND_URL:-http://localhost:5173}
+      TELEMETRY_INTERVAL_MS: ${TELEMETRY_INTERVAL_MS:-5000}
       THINGSBOARD_ENABLED: ${THINGSBOARD_ENABLED:-false}
       THINGSBOARD_URL: ${THINGSBOARD_DOCKER_URL:-http://host.docker.internal:18080}
       THINGSBOARD_TENANT_ID: ${THINGSBOARD_TENANT_ID:-}
@@ -51,32 +56,23 @@ services:
       database:
         condition: service_healthy
 
+    # Only source and schema are mounted, for hot reload. node_modules and
+    # dist stay in the container, so there is no anonymous volume to go stale.
     volumes:
-      - ./backend:/app
-      - /app/node_modules
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-    command:
-      [
-        "sh",
-        "-c",
-        "node -e \"const net=require('node:net');let tries=30;function wait(){const s=net.connect({host:'database',port:5432});s.once('connect',()=>{s.end();console.log('Database TCP connection ready')});s.once('error',()=>{s.destroy();tries--;if(!tries){console.error('Database did not become reachable');process.exit(1)}setTimeout(wait,1000)})}wait()\" && npm run db:deploy && npm run start:dev",
-      ]
-
+    # busybox wget is far lighter than spawning node for every probe.
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3000/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
-        ]
-      interval: 10s
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 30s
       timeout: 5s
-      retries: 12
-      start_period: 30s
+      retries: 3
+      start_period: 120s
+      start_interval: 2s
 
   frontend:
     build:
@@ -84,7 +80,7 @@ services:
       dockerfile: dockerfile
 
     container_name: coolsense-frontend
-    restart: unless-stopped
+    init: true
 
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
