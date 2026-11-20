@@ -6,5 +6,6 @@ docker compose stop
 docker compose -p pulsegrid -f "$HOME/Desktop/pulseGrid/docker-compose.yml" \
   -f "$PWD/thingsboard.override.yml" stop thingsboard thingsboard-db
 
-# Remove CoolSense images left untagged by rebuilds.
-docker image prune -f --filter label=com.docker.compose.project=coolsense >/dev/null
+# Best effort: remove CoolSense images left untagged by rebuilds. It fails
+# harmlessly when another prune is already running.
+docker image prune -f --filter label=com.docker.compose.project=coolsense >/dev/null 2>&1 || true
