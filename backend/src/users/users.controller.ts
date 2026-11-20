@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Delete,
+  ForbiddenException,
   Param,
   UseGuards,
 } from '@nestjs/common';
@@ -21,7 +22,11 @@ export class UsersController {
   }
 
   @Delete(':id')
-  deleteUser(@Param('id') id: string) {
+  deleteUser(@CurrentUserId() userId: string, @Param('id') id: string) {
+    // Any authenticated user could delete any account before this check.
+    if (id !== userId) {
+      throw new ForbiddenException('You can only delete your own account');
+    }
     return this.usersService.deleteUser(id);
   }
 }
