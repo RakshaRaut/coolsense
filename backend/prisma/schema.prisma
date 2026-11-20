@@ -80,6 +80,8 @@ model Telemetry {
   device             Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   @@index([deviceId, timestamp])
+  // Retention deletes by age across all devices.
+  @@index([timestamp])
 }
 
 model Simulation {
@@ -113,4 +115,6 @@ model SimulationSnapshot {
   simulation     Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
 
   @@index([simulationId, timestamp])
+  // Retention deletes by age across all simulations.
+  @@index([timestamp])
 }
