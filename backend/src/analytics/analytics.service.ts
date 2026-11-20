@@ -16,6 +16,10 @@ type DateRange = {
   end: Date;
 };
 
+// Max points in the temperature `data` array (500 rows is ~40 min of 5 s
+// telemetry); ranges with more rows are averaged into time buckets.
+const MAX_TEMPERATURE_POINTS = 500;
+
 @Injectable()
 export class AnalyticsService {
   constructor(
@@ -182,19 +186,28 @@ export class AnalyticsService {
       },
     };
 
-    // The response lists every sample, so load only the columns it returns.
-    const samples = await this.prisma.telemetry.findMany({
-      where,
-      orderBy: { timestamp: 'asc' },
-      select: {
-        timestamp: true,
-        roomTemperature: true,
-        targetTemperature: true,
-        outsideTemperature: true,
-      },
-    });
+    // Statistics and the latest reading always cover every row in the range.
+    const [[statistics], latest] = await Promise.all([
+      this.prisma.$queryRaw<
+        Array<{ minimum: number; maximum: number; total: number; count: number }>
+      >`
+        SELECT MIN("roomTemperature") AS minimum,
+               MAX("roomTemperature") AS maximum,
+               SUM("roomTemperature" ORDER BY "timestamp") AS total,
+               COUNT(*)::int AS count
+        FROM "Telemetry"
+        WHERE "deviceId" = ${deviceId}
+          AND "timestamp" >= ${range.start}
+          AND "timestamp" <= ${range.end}
+      `,
+      this.prisma.telemetry.findFirst({
+        where,
+        orderBy: { timestamp: 'desc' },
+        select: { roomTemperature: true },
+      }),
+    ]);
 
-    if (samples.length === 0) {
+    if (!latest) {
       return {
         deviceId,
         count: 0,
@@ -203,30 +216,60 @@ export class AnalyticsService {
       };
     }
 
-    const [statistics] = await this.prisma.$queryRaw<
-      Array<{ minimum: number; maximum: number; total: number; count: number }>
-    >`
-      SELECT MIN("roomTemperature") AS minimum,
-             MAX("roomTemperature") AS maximum,
-             SUM("roomTemperature" ORDER BY "timestamp") AS total,
-             COUNT(*)::int AS count
-      FROM "Telemetry"
-      WHERE "deviceId" = ${deviceId}
-        AND "timestamp" >= ${range.start}
-        AND "timestamp" <= ${range.end}
-    `;
+    // Short ranges return raw samples; longer ones are averaged into
+    // date_bin buckets starting at range.start. The +1 ms stride keeps a
+    // sample at exactly range.end inside the last of MAX_TEMPERATURE_POINTS.
+    const stride =
+      Math.floor(
+        (range.end.getTime() - range.start.getTime()) / MAX_TEMPERATURE_POINTS,
+      ) + 1;
+    const samples =
+      statistics.count <= MAX_TEMPERATURE_POINTS
+        ? await this.prisma.telemetry.findMany({
+            where,
+            orderBy: { timestamp: 'asc' },
+            select: {
+              timestamp: true,
+              roomTemperature: true,
+              targetTemperature: true,
+              outsideTemperature: true,
+            },
+          })
+        : await this.prisma.$queryRaw<
+            Array<{
+              timestamp: Date;
+              roomTemperature: number;
+              targetTemperature: number;
+              outsideTemperature: number;
+            }>
+          >`
+            SELECT date_bin(
+                     make_interval(secs => ${stride / 1000}),
+                     "timestamp",
+                     ${range.start}::timestamp
+                   ) AS "timestamp",
+                   AVG("roomTemperature") AS "roomTemperature",
+                   AVG("targetTemperature") AS "targetTemperature",
+                   AVG("outsideTemperature") AS "outsideTemperature"
+            FROM "Telemetry"
+            WHERE "deviceId" = ${deviceId}
+              AND "timestamp" >= ${range.start}
+              AND "timestamp" <= ${range.end}
+            GROUP BY 1
+            ORDER BY 1
+          `;
 
     const average = statistics.total / statistics.count;
 
     return {
       deviceId,
-      count: samples.length,
+      count: statistics.count,
       unit: '°C',
       statistics: {
         minimum: statistics.minimum,
         maximum: statistics.maximum,
         average: Number(average.toFixed(2)),
-        latest: samples[samples.length - 1].roomTemperature,
+        latest: latest.roomTemperature,
       },
       data: samples.map((sample) => ({
         timestamp: sample.timestamp,
