@@ -202,6 +202,31 @@ function deviceState(device: Device): SimulationState {
   };
 }
 
+function telemetryFromState(
+  deviceId: string,
+  state: SimulationState,
+  timestamp?: Date,
+): Prisma.TelemetryUncheckedCreateInput {
+  return {
+    deviceId,
+    simulationTime: state.simulationTime,
+    roomTemperature: state.roomTemperature,
+    targetTemperature: state.targetTemperature,
+    outsideTemperature: state.outsideTemperature,
+    roomHumidity: state.roomHumidity,
+    acPower: state.acPower,
+    compressorState: state.compressorState,
+    fanState: state.fanState,
+    coolingCapacity: state.coolingCapacity,
+    heatingCapacity: state.heatingCapacity,
+    powerWatts: state.powerWatts,
+    energyKwh: state.energyKwh,
+    operatingMode: state.operatingMode,
+    fanSpeed: state.fanSpeed,
+    timestamp,
+  };
+}
+
 function deviceStateUpdate(state: SimulationState): Prisma.DeviceUpdateInput {
   return {
     simulationTime: state.simulationTime,
@@ -226,6 +251,8 @@ export class SimulationService implements OnModuleInit {
   private readonly logger = new Logger(SimulationService.name);
   private readonly snapshotIntervalMs: number;
   private readonly lastSnapshotAt = new Map<string, number>();
+  private readonly telemetryIntervalMs: number;
+  private readonly lastTelemetryAt = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -244,6 +271,17 @@ export class SimulationService implements OnModuleInit {
     ) {
       throw new Error(
         'SIMULATION_HISTORY_INTERVAL_MS must be an integer of at least 1000',
+      );
+    }
+    this.telemetryIntervalMs = Number(
+      config.get<string>('TELEMETRY_INTERVAL_MS', '5000'),
+    );
+    if (
+      !Number.isInteger(this.telemetryIntervalMs) ||
+      this.telemetryIntervalMs < 1000
+    ) {
+      throw new Error(
+        'TELEMETRY_INTERVAL_MS must be an integer of at least 1000',
       );
     }
   }
@@ -393,6 +431,7 @@ export class SimulationService implements OnModuleInit {
       'PAUSED',
       { currentState: stateToJson(state), pausedAt: now },
       { simulationStatus: 'paused' },
+      telemetryFromState(existing.deviceId, state, now),
     );
     this.publishLifecycle('paused', paused, state);
     return paused;
@@ -439,9 +478,14 @@ export class SimulationService implements OnModuleInit {
       'STOPPED',
       { currentState: stateToJson(state), stoppedAt: now },
       { simulationStatus: 'finished' },
+      // A paused run already wrote its final row on pause.
+      status === 'RUNNING'
+        ? telemetryFromState(existing.deviceId, state, now)
+        : undefined,
     );
     this.publishLifecycle('stopped', stopped, state);
     this.lastSnapshotAt.delete(simulationId);
+    this.lastTelemetryAt.delete(simulationId);
     return stopped;
   }
 
@@ -479,6 +523,7 @@ export class SimulationService implements OnModuleInit {
       return updated;
     });
     this.lastSnapshotAt.delete(simulationId);
+    this.lastTelemetryAt.delete(simulationId);
     this.publishLifecycle('reset', reset, initialState);
     return reset;
   }
@@ -598,6 +643,7 @@ export class SimulationService implements OnModuleInit {
     to: SimulationStatus,
     data: Prisma.SimulationUpdateManyMutationInput,
     deviceData: Prisma.DeviceUpdateInput,
+    finalTelemetry?: Prisma.TelemetryUncheckedCreateInput,
   ) {
     return this.prisma.$transaction(async (transaction) => {
       const result = await transaction.simulation.updateMany({
@@ -617,6 +663,12 @@ export class SimulationService implements OnModuleInit {
         where: { id: simulation.deviceId },
         data: deviceData,
       });
+      if (finalTelemetry) {
+        await this.telemetry.saveGeneratedTelemetry(
+          finalTelemetry,
+          transaction,
+        );
+      }
       return simulation;
     });
   }
@@ -694,6 +746,10 @@ export class SimulationService implements OnModuleInit {
       saveHistory &&
       timestamp.getTime() - (this.lastSnapshotAt.get(simulationId) ?? 0) >=
         this.snapshotIntervalMs;
+    // Ticks stay at 1s for the live UI; Telemetry rows are throttled.
+    const shouldSaveTelemetry =
+      timestamp.getTime() - (this.lastTelemetryAt.get(simulationId) ?? 0) >=
+      this.telemetryIntervalMs;
     const updated = await this.prisma.$transaction(async (transaction) => {
       const current = await transaction.simulation.findUnique({
         where: { id: simulationId },
@@ -714,27 +770,12 @@ export class SimulationService implements OnModuleInit {
         where: { id: current.deviceId },
         data: deviceStateUpdate(state),
       });
-      await this.telemetry.saveGeneratedTelemetry(
-        {
-          deviceId: current.deviceId,
-          simulationTime: state.simulationTime,
-          roomTemperature: state.roomTemperature,
-          targetTemperature: state.targetTemperature,
-          outsideTemperature: state.outsideTemperature,
-          roomHumidity: state.roomHumidity,
-          acPower: state.acPower,
-          compressorState: state.compressorState,
-          fanState: state.fanState,
-          coolingCapacity: state.coolingCapacity,
-          heatingCapacity: state.heatingCapacity,
-          powerWatts: state.powerWatts,
-          energyKwh: state.energyKwh,
-          operatingMode: state.operatingMode,
-          fanSpeed: state.fanSpeed,
-          timestamp,
-        },
-        transaction,
-      );
+      if (shouldSaveTelemetry) {
+        await this.telemetry.saveGeneratedTelemetry(
+          telemetryFromState(current.deviceId, state, timestamp),
+          transaction,
+        );
+      }
       if (shouldSaveHistory) {
         await transaction.simulationSnapshot.create({
           data: {
@@ -751,10 +792,14 @@ export class SimulationService implements OnModuleInit {
       // Row deleted (device/user cascade) or no longer RUNNING: stop the orphaned ticker.
       void this.scheduler.stop(simulationId);
       this.lastSnapshotAt.delete(simulationId);
+      this.lastTelemetryAt.delete(simulationId);
       return;
     }
     if (shouldSaveHistory) {
       this.lastSnapshotAt.set(simulationId, timestamp.getTime());
+    }
+    if (shouldSaveTelemetry) {
+      this.lastTelemetryAt.set(simulationId, timestamp.getTime());
     }
     this.gateway.publishState(
       this.toSession(updated.simulation),
