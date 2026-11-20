@@ -275,6 +275,33 @@ describe('ThingsboardService', () => {
     );
   });
 
+  it('keeps rejecting an account that is not THINGSBOARD_USER_ID on later calls', async () => {
+    const fetchMock = vi.fn((url: string) =>
+      Promise.resolve(
+        url.endsWith('/api/auth/login')
+          ? new Response(JSON.stringify({ token: token() }), { status: 200 })
+          : new Response(
+              JSON.stringify({
+                id: { id: 'someone-else' },
+                tenantId: { id: 'tb-tenant-1' },
+                authority: 'TENANT_ADMIN',
+              }),
+              { status: 200 },
+            ),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    for (let call = 0; call < 2; call++) {
+      await expect(service.testConnection()).resolves.toMatchObject({
+        success: false,
+        authorized: false,
+        message: expect.stringContaining('THINGSBOARD_USER_ID'),
+      });
+    }
+    expect(service.getStatus()).toMatchObject({ authorized: false });
+  });
+
   it('reports authenticated but unauthorized when the account cannot create tenant devices', async () => {
     const fetchMock = vi
       .fn()

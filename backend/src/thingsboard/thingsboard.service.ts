@@ -231,7 +231,6 @@ export class ThingsboardService {
 
     const response = await this.request('/api/auth/user');
     const user = (await response.json()) as ThingsboardUser;
-    this.accountAuthority = user.authority ?? null;
     if (this.userId && entityId(user.id) !== this.userId) {
       throw new ServiceUnavailableException(
         'ThingsBoard credentials do not authenticate as THINGSBOARD_USER_ID',
@@ -242,6 +241,8 @@ export class ThingsboardService {
         'Authenticated ThingsBoard account does not belong to THINGSBOARD_TENANT_ID',
       );
     }
+    // Cache only after the identity checks pass; the cached value skips them on later calls.
+    this.accountAuthority = user.authority ?? null;
     if (this.accountAuthority !== 'TENANT_ADMIN') {
       throw new ServiceUnavailableException(
         'ThingsBoard device creation requires THINGSBOARD_USERNAME to be a tenant administrator',
