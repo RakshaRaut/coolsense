@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { JwtService } from '@nestjs/jwt';
 import type { Socket, Server } from 'socket.io';
 import type { SimulationState } from './models/simulation-state.model.js';
+import type { Device } from '@prisma/client';
 import { SimulationGateway } from './simulation.gateway.js';
+import type { ThingsboardIntegrationStatus } from '../thingsboard/thingsboard.service.js';
 
 describe('SimulationGateway', () => {
   const session = {
@@ -58,6 +60,110 @@ describe('SimulationGateway', () => {
     expect(validDisconnect).not.toHaveBeenCalled();
     expect(validSocket.join).toHaveBeenCalledWith('user:user-1');
     expect(invalidDisconnect).toHaveBeenCalledWith(true);
+  });
+
+  const connectedGateway = () => {
+    const gateway = new SimulationGateway({} as JwtService);
+    const emit = vi.fn();
+    const to = vi.fn().mockReturnValue({ emit });
+    Object.defineProperty(gateway, 'server', {
+      value: { to } as unknown as Server,
+    });
+    const emitted = (event: string) =>
+      emit.mock.calls.filter(([name]) => name === event).map(([, payload]) => payload);
+    return { gateway, to, emit, emitted };
+  };
+
+  it('sends device and ThingsBoard events to the owner room only', () => {
+    const { gateway, to, emitted } = connectedGateway();
+    const device = { id: 'device-1', name: 'Living room' } as Device;
+    const tbStatus = { connected: true, synchronized: false } as ThingsboardIntegrationStatus;
+
+    gateway.publishDeviceUpdated('user-1', device);
+    gateway.publishDeviceDeleted('user-1', 'device-1');
+    gateway.publishThingsboardStatus('user-1', tbStatus);
+    gateway.publishActivity('user-1', 'device', 'Device "Living room" removed', device);
+
+    expect(to.mock.calls.every(([room]) => room === 'user:user-1')).toBe(true);
+    expect(emitted('device:updated')).toEqual([device]);
+    expect(emitted('device:deleted')).toEqual([{ id: 'device-1' }]);
+    expect(emitted('thingsboard:status')).toEqual([tbStatus]);
+    expect(emitted('activity:new')).toEqual([
+      {
+        id: expect.any(String),
+        kind: 'device',
+        message: 'Device "Living room" removed',
+        deviceId: 'device-1',
+        deviceName: 'Living room',
+        at: expect.any(String),
+      },
+    ]);
+  });
+
+  it('emits device:status and an activity on lifecycle changes but not on ticks', () => {
+    const { gateway, emitted } = connectedGateway();
+
+    gateway.publishState(session, state, 'user-1');
+    expect(emitted('device:status')).toEqual([]);
+    expect(emitted('activity:new')).toEqual([]);
+
+    gateway.publishLifecycle('stopped', session, state, 'user-1');
+    expect(emitted('device:status')).toEqual([
+      {
+        deviceId: 'device-1',
+        state: {
+          power: true,
+          mode: 'cool',
+          fanSpeed: 'auto',
+          targetTempC: 24,
+          roomTempC: 29,
+          humidityPct: 55,
+          outsideTempC: 35,
+          compressorOn: true,
+          compressorModulation: 100,
+          powerW: 1250,
+          energyKwh: 0.0003,
+          coolingOutputKw: 3.5,
+          online: true,
+          updatedAt: expect.any(String),
+        },
+      },
+    ]);
+    expect(emitted('activity:new')).toEqual([
+      expect.objectContaining({
+        kind: 'simulation',
+        message: 'Simulation stopped',
+        deviceId: 'device-1',
+      }),
+    ]);
+  });
+
+  it('turns successful AC commands into device:status and activities, failures into neither', () => {
+    const { gateway, emitted } = connectedGateway();
+
+    gateway.publishCommandStatus('user-1', 'device-1', false, { acPower: true }, 'nope');
+    expect(emitted('activity:new')).toEqual([]);
+
+    gateway.publishAcState('user-1', 'device-1', { ...state, acPower: false });
+    gateway.publishCommandStatus('user-1', 'device-1', true, {
+      acPower: false,
+      targetTemperature: 22,
+      operatingMode: 'HEAT',
+    });
+
+    expect(emitted('device:status')).toEqual([
+      { deviceId: 'device-1', state: expect.objectContaining({ power: false }) },
+    ]);
+    expect(
+      emitted('activity:new').map((activity) => {
+        const { kind, message, deviceId } = activity as Record<string, unknown>;
+        return { kind, message, deviceId };
+      }),
+    ).toEqual([
+      { kind: 'power', message: 'AC turned off', deviceId: 'device-1' },
+      { kind: 'target', message: 'Target temperature set to 22.0 °C', deviceId: 'device-1' },
+      { kind: 'mode', message: 'Operating mode changed to heat', deviceId: 'device-1' },
+    ]);
   });
 
   it('emits requested lifecycle and state events with measured simulation fields', () => {

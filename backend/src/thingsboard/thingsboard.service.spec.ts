@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ThingsboardService } from './thingsboard.service.js';
+import { SimulationGateway } from '../simulation/simulation.gateway.js';
 
 describe('ThingsboardService', () => {
   let service: ThingsboardService;
@@ -46,6 +47,7 @@ describe('ThingsboardService', () => {
       update: vi.fn(),
     },
   };
+  const gateway = { publishThingsboardStatus: vi.fn() };
 
   const token = () =>
     `header.${Buffer.from(
@@ -74,6 +76,7 @@ describe('ThingsboardService', () => {
           },
         },
         { provide: PrismaService, useValue: prisma },
+        { provide: SimulationGateway, useValue: gateway },
       ],
     }).compile();
 
@@ -82,6 +85,29 @@ describe('ThingsboardService', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('pushes thingsboard:status to the owner only when connection or sync state changes', async () => {
+    prisma.device.findMany.mockResolvedValue([]);
+    const testConnection = vi
+      .spyOn(service, 'testConnection')
+      .mockResolvedValue({ success: false, message: 'down', authenticated: false });
+
+    await service.getIntegrationStatus('owner-1');
+    await service.getIntegrationStatus('owner-1');
+    expect(gateway.publishThingsboardStatus).toHaveBeenCalledOnce();
+    expect(gateway.publishThingsboardStatus).toHaveBeenLastCalledWith(
+      'owner-1',
+      expect.objectContaining({ connected: false, synchronized: false, errors: ['down'] }),
+    );
+
+    testConnection.mockResolvedValue({ success: true, message: 'ok', authenticated: true });
+    await service.getIntegrationStatus('owner-1');
+    expect(gateway.publishThingsboardStatus).toHaveBeenCalledTimes(2);
+    expect(gateway.publishThingsboardStatus).toHaveBeenLastCalledWith(
+      'owner-1',
+      expect.objectContaining({ connected: true, source: 'backend' }),
+    );
   });
 
   it('authenticates, publishes telemetry using ThingsBoard 4.x REST shape, and caches the token', async () => {

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { SimulationGateway } from '../simulation/simulation.gateway.js';
 
 type ThingsboardEntityRef = string | { id?: string };
 
@@ -16,7 +17,7 @@ type ThingsboardUser = {
   authority?: string;
 };
 
-type ThingsboardIntegrationStatus = {
+export type ThingsboardIntegrationStatus = {
   connected: boolean;
   registered: boolean;
   synchronized: boolean;
@@ -64,6 +65,7 @@ export class ThingsboardService {
   private readonly mqttAccessTokens = new Map<string, string>();
   private readonly lastSyncAt = new Map<string, string>();
   private readonly lastTelemetryAt = new Map<string, string>();
+  private readonly lastStatusKey = new Map<string, string>();
   private readonly inFlightSyncs = new Map<
     string,
     Promise<{
@@ -81,6 +83,7 @@ export class ThingsboardService {
   constructor(
     config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly gateway: SimulationGateway,
   ) {
     this.enabled =
       config.get<string>('THINGSBOARD_ENABLED', 'false') === 'true';
@@ -469,7 +472,7 @@ export class ThingsboardService {
       )
       .find((value): value is string => Boolean(value));
 
-    return {
+    const status: ThingsboardIntegrationStatus = {
       connected: connection.success,
       registered: registeredDevices.length > 0,
       synchronized: latestTelemetry !== undefined,
@@ -495,6 +498,12 @@ export class ThingsboardService {
         : null,
       source: 'backend',
     };
+    const statusKey = `${status.connected}|${status.registered}|${status.synchronized}`;
+    if (this.lastStatusKey.get(ownerId) !== statusKey) {
+      this.lastStatusKey.set(ownerId, statusKey);
+      this.gateway.publishThingsboardStatus(ownerId, status);
+    }
+    return status;
   }
 
   async syncOwnedDevices(

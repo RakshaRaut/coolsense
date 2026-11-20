@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { AcDevice, AcMode, Activity, ConnectionState, FanSpeed } from '@/types'
-import { listDevices } from '@/api/devices.api'
+import { listDevices, toAcDevice } from '@/api/devices.api'
 import { listActivities } from '@/api/activities.api'
 import { getThingsBoardStatus } from '@/api/thingsboard.api'
 import { socketService } from '@/services/socket'
@@ -97,7 +97,8 @@ export function LiveDataProvider({ children }: { children: ReactNode }) {
     socketService.connect(token ?? undefined)
 
     const offStatus = socketService.onStatus(setConnection)
-    const offDevice = socketService.on('device:updated', (device) => {
+    const offDevice = socketService.on('device:updated', (payload) => {
+      const device = toAcDevice(payload)
       setDevices((prev) => {
         const index = prev.findIndex((d) => d.id === device.id)
         if (index === -1) return [...prev, device]

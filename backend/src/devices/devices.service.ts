@@ -15,6 +15,7 @@ import {
   TelemetryQueryDto,
 } from './dto/telemetry-query.dto.js';
 import { ThingsboardService } from '../thingsboard/thingsboard.service.js';
+import { SimulationGateway } from '../simulation/simulation.gateway.js';
 
 @Injectable()
 export class DevicesService implements OnModuleInit, OnModuleDestroy {
@@ -27,6 +28,7 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly thingsboard: ThingsboardService,
+    private readonly gateway: SimulationGateway,
   ) {}
 
   onModuleInit(): void {
@@ -71,6 +73,13 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
           : {}),
       },
     });
+    this.gateway.publishDeviceUpdated(ownerId, device);
+    this.gateway.publishActivity(
+      ownerId,
+      'device',
+      `Device "${device.name}" registered`,
+      device,
+    );
 
     if (!this.thingsboard.isEnabled()) {
       return device;
@@ -191,6 +200,7 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async deleteOwnedDevice(deviceId: string, ownerId: string): Promise<void> {
+    const device = await this.findOwnedDevice(deviceId, ownerId);
     const result = await this.prisma.device.deleteMany({
       where: { id: deviceId, ownerId },
     });
@@ -199,6 +209,13 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException('Device not found');
     }
     this.clearThingsboardRetry(deviceId);
+    this.gateway.publishDeviceDeleted(ownerId, deviceId);
+    this.gateway.publishActivity(
+      ownerId,
+      'device',
+      `Device "${device.name}" removed`,
+      device,
+    );
   }
 
   async updateOwnedDevice(
@@ -223,6 +240,13 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
           : {}),
       },
     });
+    this.gateway.publishDeviceUpdated(ownerId, updated);
+    this.gateway.publishActivity(
+      ownerId,
+      'device',
+      `Configuration updated for "${updated.name}"`,
+      updated,
+    );
 
     if (!this.thingsboard.isEnabled()) {
       return updated;

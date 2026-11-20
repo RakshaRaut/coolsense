@@ -7,6 +7,7 @@ import type {
   Telemetry,
   ThingsBoardStatus,
 } from '@/types'
+import type { BackendDevice } from '@/api/devices.api'
 
 /** Server → client events. Mirrors the NestJS Socket.IO gateway contract. */
 export interface ServerEvents {
@@ -77,7 +78,8 @@ export interface ServerEvents {
   'simulation:resumed': SimulationSession
   'simulation:stopped': SimulationSession
   'device:status': { deviceId: string; state: DeviceState }
-  'device:updated': AcDevice
+  /** Mock engine sends AcDevice; the backend sends its REST device row. */
+  'device:updated': AcDevice | BackendDevice
   'device:deleted': { id: string }
   'activity:new': Activity
   'thingsboard:status': ThingsBoardStatus

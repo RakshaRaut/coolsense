@@ -7,15 +7,15 @@ import {
   SimulationController,
   SimulationManagementController,
 } from './simulation.controller.js';
-import { SimulationGateway } from './simulation.gateway.js';
+import { RealtimeModule } from './realtime.module.js';
 import { SimulationScheduler } from './simulation.scheduler.js';
 import { SimulationService } from './simulation.service.js';
 import { ThingsboardModule } from '../thingsboard/thingsboard.module.js';
 
 @Module({
-  imports: [AuthModule, DatabaseModule, SimulatorEngineModule, TelemetryModule, ThingsboardModule],
+  imports: [AuthModule, DatabaseModule, RealtimeModule, SimulatorEngineModule, TelemetryModule, ThingsboardModule],
   controllers: [SimulationController, SimulationManagementController],
-  providers: [SimulationGateway, SimulationScheduler, SimulationService],
-  exports: [SimulationGateway, SimulationScheduler, SimulationService],
+  providers: [SimulationScheduler, SimulationService],
+  exports: [RealtimeModule, SimulationScheduler, SimulationService],
 })
 export class SimulationModule {}

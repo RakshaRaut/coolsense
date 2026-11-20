@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { DevicesService } from './devices.service.js';
 import { ThingsboardService } from '../thingsboard/thingsboard.service.js';
+import { SimulationGateway } from '../simulation/simulation.gateway.js';
 
 describe('DevicesService', () => {
   let service: DevicesService;
@@ -19,6 +20,11 @@ describe('DevicesService', () => {
     isEnabled: vi.fn(),
     syncDevice: vi.fn(),
   };
+  const gateway = {
+    publishDeviceUpdated: vi.fn(),
+    publishDeviceDeleted: vi.fn(),
+    publishActivity: vi.fn(),
+  };
 
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -28,6 +34,7 @@ describe('DevicesService', () => {
         DevicesService,
         { provide: PrismaService, useValue: prisma },
         { provide: ThingsboardService, useValue: thingsboard },
+        { provide: SimulationGateway, useValue: gateway },
       ],
     }).compile();
 
@@ -175,6 +182,60 @@ describe('DevicesService', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(thingsboard.syncDevice).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+
+  it('pushes device:updated and an activity to the owner on create and update', async () => {
+    const device = { id: 'device-1', ownerId: 'user-1', name: 'Living room' };
+    const updated = { ...device, targetTemperature: 22 };
+    prisma.device.create.mockResolvedValue(device);
+    prisma.device.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(device);
+    prisma.device.update.mockResolvedValue(updated);
+
+    await service.create('user-1', { name: 'Living room' });
+    await service.updateOwnedDevice('device-1', 'user-1', {
+      targetTemperature: 22,
+    });
+
+    expect(gateway.publishDeviceUpdated).toHaveBeenNthCalledWith(1, 'user-1', device);
+    expect(gateway.publishDeviceUpdated).toHaveBeenNthCalledWith(2, 'user-1', updated);
+    expect(gateway.publishActivity).toHaveBeenNthCalledWith(
+      1,
+      'user-1',
+      'device',
+      'Device "Living room" registered',
+      device,
+    );
+    expect(gateway.publishActivity).toHaveBeenNthCalledWith(
+      2,
+      'user-1',
+      'device',
+      'Configuration updated for "Living room"',
+      updated,
+    );
+  });
+
+  it('pushes device:deleted and an activity only after an owned delete', async () => {
+    const device = { id: 'device-1', ownerId: 'user-1', name: 'Living room' };
+    prisma.device.findFirst.mockResolvedValueOnce(device);
+    prisma.device.deleteMany.mockResolvedValueOnce({ count: 1 });
+
+    await service.deleteOwnedDevice('device-1', 'user-1');
+
+    expect(gateway.publishDeviceDeleted).toHaveBeenCalledWith('user-1', 'device-1');
+    expect(gateway.publishActivity).toHaveBeenCalledWith(
+      'user-1',
+      'device',
+      'Device "Living room" removed',
+      device,
+    );
+
+    prisma.device.findFirst.mockResolvedValueOnce(null);
+    await expect(
+      service.deleteOwnedDevice('device-2', 'user-1'),
+    ).rejects.toThrow('Device not found');
+    expect(gateway.publishDeviceDeleted).toHaveBeenCalledOnce();
   });
 
   it('returns not found when the device is not owned by the user', async () => {
