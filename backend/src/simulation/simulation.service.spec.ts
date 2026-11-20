@@ -198,10 +198,10 @@ describe('SimulationService session and start inputs', () => {
     fanSpeed: 'AUTO',
   };
 
-  function makeService(prisma: object) {
+  function makeService(prisma: object, scheduler: object = {}) {
     return new SimulationService(
       prisma as unknown as PrismaService,
-      {} as SimulationScheduler,
+      scheduler as unknown as SimulationScheduler,
       {} as SimulationGateway,
       {} as TelemetryService,
       {} as ThingsboardService,
@@ -280,6 +280,111 @@ describe('SimulationService session and start inputs', () => {
     const data = await startWith(input as Partial<StartSimulationDto>);
 
     expect(data[target][field]).toBeCloseTo(expected, 9);
+  });
+
+  // POST /simulation/start while the device's latest simulation is in `status`.
+  function startExisting(status: string) {
+    const record = {
+      id: 'sim-1',
+      deviceId: 'device-1',
+      status,
+      config: { ...device, initialRoomTemperature: 30 },
+      currentState: device,
+      initialState: device,
+      device,
+    };
+    const transaction = {
+      simulation: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(record),
+      },
+      device: { update: vi.fn() },
+    };
+    const prisma = {
+      device: { findFirst: vi.fn().mockResolvedValue(device) },
+      simulation: {
+        // latestForDevice, findOne, then assertDeviceIdle (no other RUNNING run).
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(record)
+          .mockResolvedValueOnce(record)
+          .mockResolvedValueOnce(null),
+        create: vi.fn(),
+      },
+      $transaction: vi.fn((run: (tx: typeof transaction) => unknown) =>
+        run(transaction),
+      ),
+    };
+    const service = makeService(prisma, { has: () => false });
+    const resumeSimulation = vi.fn().mockResolvedValue(record);
+    Object.assign(service, {
+      resumeSimulation,
+      schedule: vi.fn(),
+      publishLifecycle: vi.fn(),
+      toSession: (simulation: object) => simulation,
+    });
+    const result = service.start('owner-1', {
+      deviceId: 'device-1',
+      speed: 5,
+      roomTempC: 27,
+      environment: {
+        humidityPct: 72,
+        insulation: InsulationLevel.POOR,
+        occupancy: 4,
+      },
+    });
+    return { result, record, prisma, transaction, resumeSimulation };
+  }
+
+  it('restarts a reset (CREATED) simulation in place with the new start inputs', async () => {
+    const { result, prisma, transaction } = startExisting('CREATED');
+    await result;
+
+    expect(prisma.simulation.create).not.toHaveBeenCalled();
+    const { where, data } = transaction.simulation.updateMany.mock.calls[0][0];
+    expect(where).toEqual({ id: 'sim-1', status: 'CREATED' });
+    expect(data.status).toBe('RUNNING');
+    expect(data.config).toMatchObject({
+      initialRoomTemperature: 27,
+      simulationSpeed: 5,
+      thermalConductanceKwPerC: expect.closeTo(0.128, 9),
+      heatLoadKw: expect.closeTo(0.9, 9),
+    });
+    expect(data.initialState).toMatchObject({
+      roomTemperature: 27,
+      roomHumidity: 72,
+      acPower: false,
+    });
+    expect(data.currentState).toMatchObject({
+      roomTemperature: 27,
+      roomHumidity: 72,
+      acPower: true,
+    });
+    expect(transaction.device.update.mock.calls[0][0].data).toMatchObject({
+      roomTemperature: 27,
+      roomHumidity: 72,
+      simulationStatus: 'running',
+      simulationSpeed: 5,
+    });
+  });
+
+  it('returns a RUNNING simulation unchanged (idempotent start)', async () => {
+    const { result, record, prisma, resumeSimulation } =
+      startExisting('RUNNING');
+
+    await expect(result).resolves.toBe(record);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.simulation.create).not.toHaveBeenCalled();
+    expect(resumeSimulation).not.toHaveBeenCalled();
+  });
+
+  it('resumes a PAUSED simulation and ignores the new start inputs', async () => {
+    const { result, prisma, resumeSimulation } = startExisting('PAUSED');
+    await result;
+
+    expect(resumeSimulation).toHaveBeenCalledWith('owner-1', 'sim-1');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.simulation.create).not.toHaveBeenCalled();
   });
 });
 

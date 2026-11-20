@@ -252,6 +252,41 @@ function deviceStateUpdate(state: SimulationState): Prisma.DeviceUpdateInput {
   };
 }
 
+// The one mapping from requested config to stored config + initial state, for new and reset runs.
+function simulationSeed(
+  device: Device,
+  requested: CreateSimulationDto['config'],
+  roomHumidity?: number,
+) {
+  const { mode, fanSpeed, ...requestedConfig } = requested;
+  const overrides: Partial<SimulationConfig> = {};
+  for (const [key, value] of Object.entries(requestedConfig)) {
+    if (value !== undefined) {
+      Object.assign(overrides, { [key]: value });
+    }
+  }
+  const config: SimulationConfig = {
+    ...deviceConfig(device),
+    ...overrides,
+  };
+  const initialState: SimulationState = {
+    ...deviceState(device),
+    roomTemperature: overrides.initialRoomTemperature ?? device.roomTemperature,
+    roomHumidity: roomHumidity ?? device.roomHumidity,
+    targetTemperature: config.targetTemperature,
+    outsideTemperature: config.outsideTemperature,
+    operatingMode: mode ?? device.operatingMode,
+    fanSpeed: fanSpeed ?? device.fanSpeed,
+    acPower: false,
+    compressorState: false,
+    fanState: false,
+    coolingCapacity: 0,
+    heatingCapacity: 0,
+    powerWatts: 0,
+  };
+  return { config, initialState };
+}
+
 @Injectable()
 export class SimulationService implements OnModuleInit {
   private readonly logger = new Logger(SimulationService.name);
@@ -310,33 +345,11 @@ export class SimulationService implements OnModuleInit {
     roomHumidity?: number,
   ) {
     const device = await this.findOwnedDevice(input.deviceId, ownerId);
-    const { mode, fanSpeed, ...requestedConfig } = input.config;
-    const overrides: Partial<SimulationConfig> = {};
-    for (const [key, value] of Object.entries(requestedConfig)) {
-      if (value !== undefined) {
-        Object.assign(overrides, { [key]: value });
-      }
-    }
-    const config: SimulationConfig = {
-      ...deviceConfig(device),
-      ...overrides,
-    };
-    const initialState: SimulationState = {
-      ...deviceState(device),
-      roomTemperature:
-        overrides.initialRoomTemperature ?? device.roomTemperature,
-      roomHumidity: roomHumidity ?? device.roomHumidity,
-      targetTemperature: config.targetTemperature,
-      outsideTemperature: config.outsideTemperature,
-      operatingMode: mode ?? device.operatingMode,
-      fanSpeed: fanSpeed ?? device.fanSpeed,
-      acPower: false,
-      compressorState: false,
-      fanState: false,
-      coolingCapacity: 0,
-      heatingCapacity: 0,
-      powerWatts: 0,
-    };
+    const { config, initialState } = simulationSeed(
+      device,
+      input.config,
+      roomHumidity,
+    );
     const simulation = await this.prisma.simulation.create({
       data: {
         name: input.name,
@@ -368,7 +381,11 @@ export class SimulationService implements OnModuleInit {
     return this.findOwnedRecord(ownerId, simulationId);
   }
 
-  async startSimulation(ownerId: string, simulationId: string) {
+  async startSimulation(
+    ownerId: string,
+    simulationId: string,
+    seed?: ReturnType<typeof simulationSeed>,
+  ) {
     const existing = await this.findOne(ownerId, simulationId);
     const status = this.requireStatus(existing.status);
     if (status !== 'CREATED' && status !== 'STOPPED') {
@@ -381,9 +398,10 @@ export class SimulationService implements OnModuleInit {
     }
     await this.assertDeviceIdle(existing.deviceId, simulationId);
 
-    const config = configFromJson(existing.config);
-    const storedState =
-      status === 'STOPPED'
+    const config = seed?.config ?? configFromJson(existing.config);
+    const storedState = seed
+      ? seed.initialState
+      : status === 'STOPPED'
         ? stateFromJson(existing.initialState)
         : stateFromJson(existing.currentState);
     const state: SimulationState = {
@@ -397,6 +415,12 @@ export class SimulationService implements OnModuleInit {
         where: { id: simulationId, status },
         data: {
           status: 'RUNNING',
+          ...(seed
+            ? {
+                config: configToJson(seed.config),
+                initialState: stateToJson(seed.initialState),
+              }
+            : {}),
           currentState: stateToJson(state),
           startedAt: now,
           pausedAt: null,
@@ -975,9 +999,9 @@ export class SimulationService implements OnModuleInit {
         return latest;
       }
       if (status === 'PAUSED') {
+        // Resume continues the paused run as it was; this request's settings are ignored.
         return this.resumeSimulation(ownerId, latest.id);
       }
-      return this.startSimulation(ownerId, latest.id);
     }
 
     const environment = input.environment;
@@ -1009,6 +1033,14 @@ export class SimulationService implements OnModuleInit {
           (environment?.windowExposure ?? 0) * FULL_WINDOW_SOLAR_GAIN_KW,
       },
     };
+    if (latest) {
+      // A reset (CREATED) run is the same session back at idle: restart it in place with these settings.
+      return this.startSimulation(
+        ownerId,
+        latest.id,
+        simulationSeed(device, createInput.config, environment?.humidityPct),
+      );
+    }
     const created = await this.create(
       ownerId,
       createInput,
