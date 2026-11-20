@@ -328,6 +328,7 @@ export class SimulationService implements OnModuleInit {
     if (this.scheduler.has(simulationId)) {
       throw new ConflictException('Simulation is already executing');
     }
+    await this.assertDeviceIdle(existing.deviceId, simulationId);
 
     const config = configFromJson(existing.config);
     const storedState =
@@ -405,6 +406,7 @@ export class SimulationService implements OnModuleInit {
     if (this.scheduler.has(simulationId)) {
       throw new ConflictException('Simulation is already executing');
     }
+    await this.assertDeviceIdle(existing.deviceId, simulationId);
     const config = configFromJson(existing.config);
     const state = stateFromJson(existing.currentState);
     const resumed = await this.updateLifecycle(
@@ -619,6 +621,19 @@ export class SimulationService implements OnModuleInit {
     });
   }
 
+  // Two RUNNING simulations on one device interleave its telemetry and corrupt energy analytics.
+  private async assertDeviceIdle(deviceId: string, simulationId: string) {
+    const other = await this.prisma.simulation.findFirst({
+      where: { deviceId, status: 'RUNNING', id: { not: simulationId } },
+      select: { id: true },
+    });
+    if (other) {
+      throw new ConflictException(
+        `Simulation ${other.id} is already running on this device`,
+      );
+    }
+  }
+
   private async findOwnedDevice(deviceId: string, ownerId: string) {
     const device = await this.prisma.device.findFirst({
       where: { id: deviceId, ownerId },
@@ -733,6 +748,9 @@ export class SimulationService implements OnModuleInit {
       return { simulation, device: updatedDevice };
     });
     if (!updated) {
+      // Row deleted (device/user cascade) or no longer RUNNING: stop the orphaned ticker.
+      void this.scheduler.stop(simulationId);
+      this.lastSnapshotAt.delete(simulationId);
       return;
     }
     if (shouldSaveHistory) {
