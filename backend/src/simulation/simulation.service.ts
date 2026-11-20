@@ -7,7 +7,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Device, Prisma } from '@prisma/client';
+import { Prisma, type Device } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { SimulationConfig } from './models/simulation-config.model.js';
 import type { SimulationState } from './models/simulation-state.model.js';
@@ -15,6 +15,7 @@ import { TelemetryService } from '../telemetry/telemetry.service.js';
 import { SimulationGateway } from './simulation.gateway.js';
 import { SimulationScheduler } from './simulation.scheduler.js';
 import {
+  InsulationLevel,
   SimulationEnvironmentUpdateDto,
   SimulationSpeedDto,
   StartSimulationDto,
@@ -22,6 +23,11 @@ import {
 import { CreateSimulationDto } from './dto/create-simulation.dto.js';
 import { UpdateSimulationDto } from './dto/update-simulation.dto.js';
 import { ThingsboardService } from '../thingsboard/thingsboard.service.js';
+import {
+  FULL_WINDOW_SOLAR_GAIN_KW,
+  INSULATION_CONDUCTANCE_FACTOR,
+  OCCUPANT_HEAT_KW,
+} from './utils/environment.util.js';
 
 const SIMULATION_STATUSES = [
   'CREATED',
@@ -298,7 +304,11 @@ export class SimulationService implements OnModuleInit {
     }
   }
 
-  async create(ownerId: string, input: CreateSimulationDto) {
+  async create(
+    ownerId: string,
+    input: CreateSimulationDto,
+    roomHumidity?: number,
+  ) {
     const device = await this.findOwnedDevice(input.deviceId, ownerId);
     const { mode, fanSpeed, ...requestedConfig } = input.config;
     const overrides: Partial<SimulationConfig> = {};
@@ -313,6 +323,9 @@ export class SimulationService implements OnModuleInit {
     };
     const initialState: SimulationState = {
       ...deviceState(device),
+      roomTemperature:
+        overrides.initialRoomTemperature ?? device.roomTemperature,
+      roomHumidity: roomHumidity ?? device.roomHumidity,
       targetTemperature: config.targetTemperature,
       outsideTemperature: config.outsideTemperature,
       operatingMode: mode ?? device.operatingMode,
@@ -379,7 +392,7 @@ export class SimulationService implements OnModuleInit {
       fanState: true,
     };
     const now = new Date();
-    const started = await this.prisma.$transaction(async (transaction) => {
+    const starting = this.prisma.$transaction(async (transaction) => {
       const result = await transaction.simulation.updateMany({
         where: { id: simulationId, status },
         data: {
@@ -409,6 +422,9 @@ export class SimulationService implements OnModuleInit {
         include: { device: true },
       });
     });
+    const started = await starting.catch((error: unknown) =>
+      this.runningConflict(error, existing.deviceId, simulationId),
+    );
 
     this.lastSnapshotAt.set(simulationId, Date.now());
     this.schedule(started, config, state);
@@ -454,6 +470,8 @@ export class SimulationService implements OnModuleInit {
       'RUNNING',
       { pausedAt: null },
       { simulationStatus: 'running' },
+    ).catch((error: unknown) =>
+      this.runningConflict(error, existing.deviceId, simulationId),
     );
     this.schedule(resumed, config, state);
     this.publishLifecycle('resumed', resumed, state);
@@ -565,31 +583,34 @@ export class SimulationService implements OnModuleInit {
       ...(patch.fanSpeed === undefined ? {} : { fanSpeed: patch.fanSpeed }),
     };
 
-    const updated = await this.prisma.$transaction(async (transaction) => {
-      const simulation = await transaction.simulation.update({
-        where: { id: simulationId },
-        data: {
-          config: configToJson(nextConfig),
-          currentState: stateToJson(nextState),
-        },
-        include: { device: true },
+    // Locked so an in-flight tick cannot overwrite this patch.
+    return this.scheduler.exclusive(simulationId, async () => {
+      const updated = await this.prisma.$transaction(async (transaction) => {
+        const simulation = await transaction.simulation.update({
+          where: { id: simulationId },
+          data: {
+            config: configToJson(nextConfig),
+            currentState: stateToJson(nextState),
+          },
+          include: { device: true },
+        });
+        await transaction.device.update({
+          where: { id: existing.deviceId },
+          data: {
+            ...deviceStateUpdate(nextState),
+            outsideTemperature: nextConfig.outsideTemperature,
+            targetTemperature: nextConfig.targetTemperature,
+            simulationSpeed: nextConfig.simulationSpeed,
+          },
+        });
+        return simulation;
       });
-      await transaction.device.update({
-        where: { id: existing.deviceId },
-        data: {
-          ...deviceStateUpdate(nextState),
-          outsideTemperature: nextConfig.outsideTemperature,
-          targetTemperature: nextConfig.targetTemperature,
-          simulationSpeed: nextConfig.simulationSpeed,
-        },
+      this.scheduler.update(simulationId, {
+        config: nextConfig,
+        state: nextState,
       });
-      return simulation;
+      return updated;
     });
-    this.scheduler.update(simulationId, {
-      config: nextConfig,
-      state: nextState,
-    });
-    return updated;
   }
 
   async getState(ownerId: string, simulationId: string) {
@@ -623,16 +644,24 @@ export class SimulationService implements OnModuleInit {
         targetTemperature: state.targetTemperature,
         outsideTemperature: state.outsideTemperature,
       };
-      await this.prisma.simulation.update({
-        where: { id: simulation.id },
-        data: {
-          config: configToJson(nextConfig),
-          currentState: stateToJson(state),
-        },
-      });
-      this.scheduler.update(simulation.id, {
-        config: nextConfig,
-        state,
+      // Locked so an in-flight tick cannot overwrite this command.
+      await this.scheduler.exclusive(simulation.id, async () => {
+        await this.prisma.simulation.update({
+          where: { id: simulation.id },
+          data: {
+            config: configToJson(nextConfig),
+            currentState: stateToJson(state),
+          },
+        });
+        // A tick that committed after the caller's device write left the row stale.
+        await this.prisma.device.update({
+          where: { id: deviceId },
+          data: deviceStateUpdate(state),
+        });
+        this.scheduler.update(simulation.id, {
+          config: nextConfig,
+          state,
+        });
       });
     }
   }
@@ -684,6 +713,24 @@ export class SimulationService implements OnModuleInit {
         `Simulation ${other.id} is already running on this device`,
       );
     }
+  }
+
+  // The partial unique index on RUNNING rows is the atomic guard; assertDeviceIdle is the fast path.
+  private async runningConflict(
+    error: unknown,
+    deviceId: string,
+    simulationId: string,
+  ): Promise<never> {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      await this.assertDeviceIdle(deviceId, simulationId);
+      throw new ConflictException(
+        'Another simulation is already running on this device',
+      );
+    }
+    throw error;
   }
 
   private async findOwnedDevice(deviceId: string, ownerId: string) {
@@ -948,13 +995,25 @@ export class SimulationService implements OnModuleInit {
           environment?.areaM2 && environment.heightM
             ? environment.areaM2 * environment.heightM
             : config.roomVolume,
+        initialRoomTemperature: input.roomTempC,
+        thermalConductanceKwPerC:
+          config.thermalConductanceKwPerC *
+          INSULATION_CONDUCTANCE_FACTOR[
+            environment?.insulation ?? InsulationLevel.AVERAGE
+          ],
         heatLoadKw:
-          environment?.heatGainW === undefined
+          (environment?.heatGainW === undefined
             ? config.heatLoadKw
-            : environment.heatGainW / 1000,
+            : environment.heatGainW / 1000) +
+          (environment?.occupancy ?? 0) * OCCUPANT_HEAT_KW +
+          (environment?.windowExposure ?? 0) * FULL_WINDOW_SOLAR_GAIN_KW,
       },
     };
-    const created = await this.create(ownerId, createInput);
+    const created = await this.create(
+      ownerId,
+      createInput,
+      environment?.humidityPct,
+    );
     return this.startSimulation(ownerId, created.id);
   }
 
@@ -993,11 +1052,8 @@ export class SimulationService implements OnModuleInit {
   }
 
   async getSession(ownerId: string, deviceId?: string) {
-    const simulation = await this.latestForDevice(ownerId, deviceId, [
-      'RUNNING',
-      'PAUSED',
-      'STOPPED',
-    ]);
+    // Any status: after a reset the UI still needs the session, shown as idle.
+    const simulation = await this.latestForDevice(ownerId, deviceId);
     return simulation ? this.toSession(simulation) : null;
   }
 

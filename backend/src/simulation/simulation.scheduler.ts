@@ -26,6 +26,7 @@ export type SimulationTickHandler = (
 export class SimulationScheduler implements OnModuleDestroy {
   private readonly logger = new Logger(SimulationScheduler.name);
   private readonly contexts = new Map<string, SimulationExecutionContext>();
+  private readonly queues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly engine: SimulationEngineService) {}
 
@@ -109,6 +110,22 @@ export class SimulationScheduler implements OnModuleDestroy {
     return true;
   }
 
+  // Runs task after every earlier task for this simulation. Ticks and control
+  // updates go through here so a tick never overwrites a command it raced with.
+  exclusive<T>(simulationId: string, task: () => Promise<T>): Promise<T> {
+    const result = (this.queues.get(simulationId) ?? Promise.resolve()).then(
+      task,
+    );
+    const tail = result.catch(() => undefined);
+    this.queues.set(simulationId, tail);
+    void tail.then(() => {
+      if (this.queues.get(simulationId) === tail) {
+        this.queues.delete(simulationId);
+      }
+    });
+    return result;
+  }
+
   async onModuleDestroy(): Promise<void> {
     await Promise.all(
       [...this.contexts.keys()].map((simulationId) => this.stop(simulationId)),
@@ -126,26 +143,31 @@ export class SimulationScheduler implements OnModuleDestroy {
 
     context.isTicking = true;
     try {
-      const now = Date.now();
-      const elapsedSeconds = Math.max(0.001, (now - context.lastTickAt) / 1000);
-      const nextState = this.engine.step(
-        context.currentState,
-        context.config,
-        elapsedSeconds * context.config.simulationSpeed,
-      );
-      const saveHistory = now - context.lastSnapshotAt >= 5000;
-      await onTick(
-        simulationId,
-        nextState,
-        context.config,
-        new Date(now),
-        saveHistory,
-      );
-      context.currentState = nextState;
-      context.lastTickAt = now;
-      if (saveHistory) {
-        context.lastSnapshotAt = now;
-      }
+      await this.exclusive(simulationId, async () => {
+        const now = Date.now();
+        const elapsedSeconds = Math.max(
+          0.001,
+          (now - context.lastTickAt) / 1000,
+        );
+        const nextState = this.engine.step(
+          context.currentState,
+          context.config,
+          elapsedSeconds * context.config.simulationSpeed,
+        );
+        const saveHistory = now - context.lastSnapshotAt >= 5000;
+        await onTick(
+          simulationId,
+          nextState,
+          context.config,
+          new Date(now),
+          saveHistory,
+        );
+        context.currentState = nextState;
+        context.lastTickAt = now;
+        if (saveHistory) {
+          context.lastSnapshotAt = now;
+        }
+      });
     } finally {
       context.isTicking = false;
     }
