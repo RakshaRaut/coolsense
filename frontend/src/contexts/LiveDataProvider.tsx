@@ -8,11 +8,12 @@ import {
   type ReactNode,
 } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import type { AcDevice, Activity, ConnectionState } from '@/types'
+import type { AcDevice, AcMode, Activity, ConnectionState, FanSpeed } from '@/types'
 import { listDevices } from '@/api/devices.api'
 import { listActivities } from '@/api/activities.api'
 import { getThingsBoardStatus } from '@/api/thingsboard.api'
 import { socketService } from '@/services/socket'
+import { useAuth } from './AuthProvider'
 import { useSettings } from './SettingsProvider'
 
 interface LiveDataContextValue {
@@ -30,8 +31,31 @@ interface LiveDataContextValue {
 
 const LiveDataContext = createContext<LiveDataContextValue | null>(null)
 
+function modeFromBackend(value: string, fallback: AcMode): AcMode {
+  const modes: Record<string, AcMode> = {
+    COOL: 'cool',
+    HEAT: 'heat',
+    DRY: 'dry',
+    FAN: 'fan',
+    AUTO: 'auto',
+  }
+  return modes[value.toUpperCase()] ?? fallback
+}
+
+function fanFromBackend(value: string, fallback: FanSpeed): FanSpeed {
+  const speeds: Record<string, FanSpeed> = {
+    AUTO: 'auto',
+    LOW: 'low',
+    MEDIUM: 'medium',
+    HIGH: 'high',
+    TURBO: 'turbo',
+  }
+  return speeds[value.toUpperCase()] ?? fallback
+}
+
 export function LiveDataProvider({ children }: { children: ReactNode }) {
   const { settings } = useSettings()
+  const { token } = useAuth()
   const [devices, setDevices] = useState<AcDevice[]>([])
   const [activities, setActivities] = useState<Activity[]>([])
   const [connection, setConnection] = useState<ConnectionState>('connecting')
@@ -70,7 +94,7 @@ export function LiveDataProvider({ children }: { children: ReactNode }) {
 
   // Single socket connection for the authenticated session.
   useEffect(() => {
-    socketService.connect()
+    socketService.connect(token ?? undefined)
 
     const offStatus = socketService.onStatus(setConnection)
     const offDevice = socketService.on('device:updated', (device) => {
@@ -91,6 +115,83 @@ export function LiveDataProvider({ children }: { children: ReactNode }) {
     const offTb = socketService.on('thingsboard:status', (status) => {
       setThingsboard(status.connected ? 'connected' : 'disconnected')
     })
+    const offTelemetry = socketService.on('telemetry:update', (telemetry) => {
+      setDevices((prev) =>
+        prev.map((device) =>
+          device.id === telemetry.deviceId
+            ? {
+                ...device,
+                state: {
+                  ...device.state,
+                  roomTempC: telemetry.roomTempC,
+                  targetTempC: telemetry.targetTempC,
+                  outsideTempC: telemetry.outsideTempC,
+                  humidityPct: telemetry.humidityPct,
+                  powerW: telemetry.powerW,
+                  energyKwh: telemetry.energyKwh,
+                  compressorOn: telemetry.compressorOn,
+                  compressorModulation: telemetry.compressorModulation,
+                  coolingOutputKw: telemetry.coolingKw,
+                  online: true,
+                  updatedAt: telemetry.timestamp,
+                },
+              }
+            : device,
+        ),
+      )
+    })
+    const offSimulationState = socketService.on('simulation:state', (state) => {
+      setDevices((prev) =>
+        prev.map((device) =>
+          device.id === state.deviceId
+            ? {
+                ...device,
+                simulated: state.status === 'running',
+                state: {
+                  ...device.state,
+                  roomTempC: state.roomTemperature,
+                  targetTempC: state.targetTemperature,
+                  outsideTempC: state.outsideTemperature,
+                  humidityPct: state.humidity,
+                  powerW: state.powerConsumption,
+                  energyKwh: state.energyConsumption,
+                  compressorOn: state.compressorState,
+                  compressorModulation: state.compressorState ? 100 : 0,
+                  updatedAt: state.timestamp,
+                },
+              }
+            : device,
+        ),
+      )
+    })
+    const offAcState = socketService.on('ac:state', (state) => {
+      setDevices((prev) =>
+        prev.map((device) =>
+          device.id === state.deviceId
+            ? {
+                ...device,
+                state: {
+                  ...device.state,
+                  power: state.acPower,
+                  mode: modeFromBackend(state.operatingMode, device.state.mode),
+                  fanSpeed: fanFromBackend(state.fanSpeed, device.state.fanSpeed),
+                  targetTempC: state.targetTemperature,
+                  roomTempC: state.roomTemperature,
+                  outsideTempC: state.outsideTemperature,
+                  humidityPct: state.roomHumidity,
+                  compressorOn: state.compressorState,
+                  compressorModulation: state.compressorState ? 100 : 0,
+                  powerW: state.powerWatts,
+                  energyKwh: state.energyKwh,
+                  coolingOutputKw: state.coolingCapacity,
+                  online: true,
+                  updatedAt: state.timestamp,
+                },
+              }
+            : device,
+        ),
+      )
+    })
 
     return () => {
       offStatus()
@@ -98,9 +199,12 @@ export function LiveDataProvider({ children }: { children: ReactNode }) {
       offDeleted()
       offActivity()
       offTb()
+      offTelemetry()
+      offSimulationState()
+      offAcState()
       socketService.disconnect()
     }
-  }, [])
+  }, [token])
 
   const replaceDevice = useCallback((device: AcDevice) => {
     setDevices((prev) => prev.map((d) => (d.id === device.id ? device : d)))

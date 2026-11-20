@@ -11,7 +11,67 @@ import type {
 /** Server → client events. Mirrors the NestJS Socket.IO gateway contract. */
 export interface ServerEvents {
   'telemetry:update': Telemetry
+  'simulation:telemetry': Telemetry & {
+    simulationTime: number
+    simulationId: string
+  }
+  'simulation:state': {
+    simulationId: string
+    deviceId: string
+    status: string
+    roomTemperature: number
+    humidity: number
+    compressorState: boolean
+    powerConsumption: number
+    energyConsumption: number
+    targetTemperature: number
+    outsideTemperature: number
+    timestamp: string
+  }
+  'ac:state': {
+    deviceId: string
+    simulationTime: number
+    roomTemperature: number
+    roomHumidity: number
+    outsideTemperature: number
+    targetTemperature: number
+    acPower: boolean
+    compressorState: boolean
+    fanState: boolean
+    coolingCapacity: number
+    heatingCapacity: number
+    powerWatts: number
+    energyKwh: number
+    operatingMode: string
+    fanSpeed: string
+    timestamp: string
+  }
+  'ac:command:status': {
+    deviceId: string
+    success: boolean
+    command: Record<string, unknown>
+    message?: string
+    timestamp: string
+  }
   'simulation:update': SimulationUpdate
+  'simulation.state.updated': {
+    simulationId: string
+    deviceId: string
+    status: string
+    roomTemperature: number
+    humidity: number
+    compressorState: boolean
+    powerConsumption: number
+    energyConsumption: number
+    targetTemperature: number
+    outsideTemperature: number
+    timestamp: string
+  }
+  'simulation.started': ServerEvents['simulation.state.updated']
+  'simulation.paused': ServerEvents['simulation.state.updated']
+  'simulation.resumed': ServerEvents['simulation.state.updated']
+  'simulation.stopped': ServerEvents['simulation.state.updated']
+  'simulation.reset': ServerEvents['simulation.state.updated']
   'simulation:started': SimulationSession
   'simulation:paused': SimulationSession
   'simulation:resumed': SimulationSession

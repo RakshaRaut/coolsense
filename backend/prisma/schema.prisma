@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  devices      Device[]
+}
+
+model Device {
+  id                       String       @id @default(uuid())
+  ownerId                  String
+  name                     String
+  acType                   String       @default("NON_INVERTER")
+  roomVolume               Float        @default(30)
+  outsideTemperature       Float        @default(35)
+  initialRoomTemperature   Float        @default(32)
+  targetTemperature        Float        @default(24)
+  ratedCoolingCapacity     Float        @default(3.5)
+  ratedHeatingCapacity     Float        @default(3.5)
+  ratedPowerWatts          Float        @default(1200)
+  heatLoadKw               Float        @default(0.5)
+  thermostatDifferential   Float        @default(1)
+  simulationSpeed          Float        @default(1)
+  thermalCapacityKwhPerC   Float        @default(1.5)
+  thermalConductanceKwPerC Float        @default(0.08)
+  fanPowerWatts            Float        @default(50)
+  simulationTime           Float        @default(0)
+  roomTemperature          Float        @default(32)
+  roomHumidity             Float        @default(60)
+  acPower                  Boolean      @default(false)
+  compressorState          Boolean      @default(false)
+  fanState                 Boolean      @default(false)
+  coolingCapacity          Float        @default(0)
+  heatingCapacity          Float        @default(0)
+  powerWatts               Float        @default(0)
+  energyKwh                Float        @default(0)
+  operatingMode            String       @default("COOL")
+  fanSpeed                 String       @default("AUTO")
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
+  simulationStatus         String       @default("idle")
+  simulationStartedAt      DateTime?
+  thingsboardDeviceId      String?      @unique
+  owner                    User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  simulations              Simulation[]
+  telemetry                Telemetry[]
+
+  @@index([ownerId])
+}
+
+model Telemetry {
+  id                 String   @id @default(uuid())
+  deviceId           String
+  timestamp          DateTime @default(now())
+  simulationTime     Float
+  roomTemperature    Float
+  targetTemperature  Float
+  outsideTemperature Float
+  roomHumidity       Float
+  acPower            Boolean
+  compressorState    Boolean
+  fanState           Boolean
+  coolingCapacity    Float
+  heatingCapacity    Float
+  powerWatts         Float
+  energyKwh          Float
+  operatingMode      String
+  fanSpeed           String
+  device             Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, timestamp])
+}
+
+model Simulation {
+  id           String               @id @default(uuid())
+  name         String
+  deviceId     String
+  status       String               @default("CREATED")
+  config       Json
+  currentState Json
+  initialState Json
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  startedAt    DateTime?
+  pausedAt     DateTime?
+  stoppedAt    DateTime?
+  device       Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  history      SimulationSnapshot[]
+
+  @@index([deviceId, status])
+  @@index([updatedAt])
+}
+
+model SimulationSnapshot {
+  id             String     @id @default(uuid())
+  simulationId   String
+  timestamp      DateTime   @default(now())
+  simulationTime Float
+  state          Json
+  simulation     Simulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+
+  @@index([simulationId, timestamp])
+}

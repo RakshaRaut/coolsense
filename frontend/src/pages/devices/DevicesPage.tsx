@@ -416,8 +416,17 @@ export function DevicesPage() {
         real time from the simulation engine.
       </p>
 
-      <DeviceForm open={formOpen} onClose={() => setFormOpen(false)} />
-      <DeviceForm open={Boolean(editing)} device={editing} onClose={() => setEditing(null)} />
+      <DeviceForm
+        open={formOpen}
+        onClose={() => setFormOpen(false)}
+        onSaved={() => refetch()}
+      />
+      <DeviceForm
+        open={Boolean(editing)}
+        device={editing}
+        onClose={() => setEditing(null)}
+        onSaved={() => refetch()}
+      />
       <ConfirmDialog
         open={Boolean(deleting)}
         title={`Delete ${deleting?.name ?? 'device'}?`}

@@ -1,0 +1,6 @@
+# Secrets: real credentials live here; copy .env.example instead
+.env
+
+node_modules/
+dist/
+*.tsbuildinfo

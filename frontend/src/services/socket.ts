@@ -6,7 +6,17 @@ import { TypedEmitter, type Listener, type ServerEventName, type ServerEvents } 
 
 const EVENT_NAMES: ServerEventName[] = [
   'telemetry:update',
+  'simulation:telemetry',
+  'simulation:state',
+  'ac:state',
+  'ac:command:status',
   'simulation:update',
+  'simulation.state.updated',
+  'simulation.started',
+  'simulation.paused',
+  'simulation.resumed',
+  'simulation.stopped',
+  'simulation.reset',
   'simulation:started',
   'simulation:paused',
   'simulation:resumed',

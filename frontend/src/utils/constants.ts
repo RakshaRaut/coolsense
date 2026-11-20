@@ -20,9 +20,11 @@ import type {
 } from '@/types'
 
 export const APP_NAME = 'CoolSense'
-export const API_URL = import.meta.env.VITE_API_URL ?? '/api'
-export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ?? ''
-export const IS_MOCK = (import.meta.env.VITE_USE_MOCK ?? 'true') !== 'false'
+export const API_URL = import.meta.env.VITE_API_URL ?? '/api/v1'
+export const SOCKET_URL =
+  import.meta.env.VITE_SOCKET_URL ??
+  (import.meta.env.VITE_API_URL?.replace(/\/api\/v1\/?$/, '') ?? '')
+export const IS_MOCK = (import.meta.env.VITE_USE_MOCK ?? 'false') !== 'false'
 
 export const MODEL_CATALOG: AcModel[] = [
   {

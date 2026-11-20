@@ -19,11 +19,12 @@ import {
 } from 'lucide-react'
 import type { AcDevice } from '@/types'
 import { getFleetHistory } from '@/api/dashboard.api'
+import { getDeviceTemperatureHistory } from '@/api/devices.api'
 import { getAnalytics } from '@/api/analytics.api'
 import { useLiveData } from '@/contexts/LiveDataProvider'
 import { useAuth } from '@/contexts/AuthProvider'
 import { useSettings } from '@/contexts/SettingsProvider'
-import { TIME_RANGES } from '@/utils/constants'
+import { IS_MOCK, TIME_RANGES } from '@/utils/constants'
 import {
   cn,
   formatLongDate,
@@ -45,6 +46,7 @@ import { PowerChart } from '@/components/dashboard/PowerChart'
 import { EnergyChart } from '@/components/dashboard/EnergyChart'
 import { DeviceOverviewCard } from '@/components/dashboard/DeviceOverviewCard'
 import { DeviceForm } from '@/components/devices/DeviceForm'
+import { useSimulationSocket } from '@/hooks/useSimulationSocket'
 
 function greeting(): string {
   const hour = new Date().getHours()
@@ -61,15 +63,27 @@ export function DashboardPage() {
   const navigate = useNavigate()
 
   const [range, setRange] = useState<TimeRange>('24h')
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>()
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<AcDevice | null>(null)
 
   const rangeSeconds = TIME_RANGES.find((r) => r.value === range)?.seconds ?? 86_400
   const bucketCount = range === '7d' ? 84 : range === '1h' ? 60 : 96
+  const selectedDevice = devices.find((device) => device.id === selectedDeviceId) ?? devices[0]
+  const activeDeviceId = selectedDevice?.id
+  const live = useSimulationSocket(activeDeviceId)
 
   const fleetQuery = useQuery({
     queryKey: ['fleet-history', range],
     queryFn: () => getFleetHistory(rangeSeconds, bucketCount),
+    refetchInterval: 20_000,
+  })
+
+  const temperatureQuery = useQuery({
+    queryKey: ['device-temperature-history', activeDeviceId, range],
+    queryFn: () =>
+      getDeviceTemperatureHistory(activeDeviceId ?? '', rangeSeconds, 1000),
+    enabled: Boolean(activeDeviceId),
     refetchInterval: 20_000,
   })
 
@@ -110,6 +124,34 @@ export function DashboardPage() {
       cooling: active.filter((d) => d.state.compressorOn).length,
     }
   }, [devices, settings.pricePerKwh])
+
+  const selectedTemperature = live.telemetry?.roomTempC ?? selectedDevice?.state.roomTempC ?? summary.avgRoom
+  const selectedTarget = live.telemetry?.targetTempC ?? selectedDevice?.state.targetTempC ?? summary.avgTarget
+  const selectedOutside = live.telemetry?.outsideTempC ?? selectedDevice?.state.outsideTempC ?? summary.avgOutside
+  const selectedHumidity = live.telemetry?.humidityPct ?? selectedDevice?.state.humidityPct ?? summary.avgHumidity
+
+  const temperatureSeries = useMemo(() => {
+    const cutoff = Date.now() - rangeSeconds * 1000
+    const samples = (temperatureQuery.data ?? []).filter(
+      (sample) => new Date(sample.time).getTime() >= cutoff,
+    )
+    const telemetry = live.telemetry
+    if (
+      telemetry &&
+      telemetry.deviceId === activeDeviceId &&
+      new Date(telemetry.timestamp).getTime() >= cutoff
+    ) {
+      samples.push({
+        time: telemetry.timestamp,
+        roomTempC: telemetry.roomTempC,
+        targetTempC: telemetry.targetTempC,
+        outsideTempC: telemetry.outsideTempC,
+      })
+    }
+    return samples
+      .sort((a, b) => a.time.localeCompare(b.time))
+      .filter((sample, index, rows) => index === 0 || sample.time !== rows[index - 1].time)
+  }, [temperatureQuery.data, live.telemetry, activeDeviceId, rangeSeconds])
 
   const trend = useMemo(() => {
     const series = fleetQuery.data ?? []
@@ -213,29 +255,29 @@ export function DashboardPage() {
                 <div>
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-[10px] font-semibold tracking-[0.14em] text-muted uppercase">
-                      Fleet average temperature
+                      {selectedDevice?.name ?? 'Fleet average'} temperature
                     </p>
-                    <DataSourceBadge source="mock" />
+                    <DataSourceBadge source={IS_MOCK ? 'mock' : 'backend'} />
                   </div>
                   <div className="mt-3 flex items-end gap-2">
                     <span className="tnum text-[44px] leading-none font-semibold tracking-[-0.03em] text-fg">
-                      {summary.avgRoom.toFixed(1)}
+                      {selectedTemperature.toFixed(1)}
                     </span>
                     <span className="pb-1 text-sm font-medium text-muted">{tempUnit}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <Badge tone="accent">
-                      Target {formatTemp(summary.avgTarget, settings.temperatureUnit)}
+                      Target {formatTemp(selectedTarget, settings.temperatureUnit)}
                     </Badge>
                     <span
                       className={cn(
                         'text-[11px] font-medium',
-                        summary.avgRoom > summary.avgTarget + 0.5 ? 'text-warning' : 'text-success',
+                        selectedTemperature > selectedTarget + 0.5 ? 'text-warning' : 'text-success',
                       )}
                     >
-                      {summary.avgRoom > summary.avgTarget
-                        ? `${(summary.avgRoom - summary.avgTarget).toFixed(1)}° above target`
-                        : `${(summary.avgTarget - summary.avgRoom).toFixed(1)}° below target`}
+                      {selectedTemperature > selectedTarget
+                        ? `${(selectedTemperature - selectedTarget).toFixed(1)}° above target`
+                        : `${(selectedTarget - selectedTemperature).toFixed(1)}° below target`}
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-2.5 text-[10.5px] text-muted">
@@ -243,14 +285,14 @@ export function DashboardPage() {
                       <CloudSun className="size-3" />
                       Outside
                       <span className="tnum font-semibold text-fg-soft">
-                        {formatTemp(summary.avgOutside, settings.temperatureUnit)}
+                        {formatTemp(selectedOutside, settings.temperatureUnit)}
                       </span>
                     </span>
                     <span className="flex items-center gap-1">
                       <Droplets className="size-3" />
                       Humidity
                       <span className="tnum font-semibold text-fg-soft">
-                        {Math.round(summary.avgHumidity)}%
+                        {Math.round(selectedHumidity)}%
                       </span>
                     </span>
                   </div>
@@ -283,13 +325,47 @@ export function DashboardPage() {
               </div>
 
               <div className="p-4 sm:p-5">
-                <TemperatureChart
-                  data={fleetQuery.data ?? []}
-                  range={range}
-                  onRangeChange={setRange}
-                  height={232}
-                  showTarget
-                />
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <label className="flex items-center gap-2 text-[11px] text-muted">
+                    Device
+                    <select
+                      aria-label="Select device for temperature chart"
+                      className="rounded-md border border-line bg-card px-2 py-1 text-[11px] text-fg"
+                      value={activeDeviceId ?? ''}
+                      onChange={(event) => setSelectedDeviceId(event.target.value)}
+                    >
+                      {devices.map((device) => (
+                        <option key={device.id} value={device.id}>
+                          {device.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <span className="text-[10.5px] text-muted">
+                    {live.simulation?.simulationId
+                      ? live.simulation.status
+                      : selectedDevice?.simulated
+                        ? 'running'
+                        : 'idle'}
+                    {live.commandStatus
+                      ? ` · last command ${live.commandStatus.success ? 'confirmed' : 'failed'}`
+                      : ''}
+                  </span>
+                </div>
+                {temperatureQuery.error ? (
+                  <ErrorState
+                    message={temperatureQuery.error.message}
+                    onRetry={() => void temperatureQuery.refetch()}
+                  />
+                ) : (
+                  <TemperatureChart
+                    data={temperatureSeries}
+                    range={range}
+                    onRangeChange={setRange}
+                    height={232}
+                    showTarget
+                  />
+                )}
               </div>
             </div>
           </section>
@@ -415,14 +491,25 @@ export function DashboardPage() {
 
           <p className="flex items-center justify-center gap-1.5 pb-2 text-[10.5px] text-muted">
             <Cpu className="size-3" />
-            Simulation running in mock mode · data generated in your browser · last update{' '}
-            {devices[0] ? formatRelative(devices[0].state.updatedAt) : '—'}
+            {IS_MOCK
+              ? 'Simulation running in mock mode · data generated in your browser · last update'
+              : 'Connected to backend telemetry · last update'}{' '}
+            {selectedDevice ? formatRelative(selectedDevice.state.updatedAt) : '—'}
           </p>
         </>
       )}
 
-      <DeviceForm open={addOpen} onClose={() => setAddOpen(false)} />
-      <DeviceForm open={Boolean(editing)} device={editing} onClose={() => setEditing(null)} />
+      <DeviceForm
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onSaved={() => refetch()}
+      />
+      <DeviceForm
+        open={Boolean(editing)}
+        device={editing}
+        onClose={() => setEditing(null)}
+        onSaved={() => refetch()}
+      />
     </div>
   )
 }

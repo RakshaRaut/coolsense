@@ -1,0 +1,100 @@
+services:
+  database:
+    image: postgres:16
+    container_name: coolsense-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-coolsense_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-coolsense_password}
+      POSTGRES_DB: ${POSTGRES_DB:-coolsense_db}
+
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+
+    volumes:
+      - coolsense_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: dockerfile
+
+    container_name: coolsense-backend
+    restart: unless-stopped
+
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://${POSTGRES_USER:-coolsense_user}:${POSTGRES_PASSWORD:-coolsense_password}@database:5432/${POSTGRES_DB:-coolsense_db}?schema=public}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the root .env file}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      CORS_ORIGIN: ${FRONTEND_URL:-http://localhost:5173}
+      THINGSBOARD_ENABLED: ${THINGSBOARD_ENABLED:-false}
+      THINGSBOARD_URL: ${THINGSBOARD_DOCKER_URL:-http://host.docker.internal:18080}
+      THINGSBOARD_TENANT_ID: ${THINGSBOARD_TENANT_ID:-}
+      THINGSBOARD_USER_ID: ${THINGSBOARD_USER_ID:-}
+      THINGSBOARD_USERNAME: ${THINGSBOARD_USERNAME:-}
+      THINGSBOARD_PASSWORD: ${THINGSBOARD_PASSWORD:-}
+
+    depends_on:
+      database:
+        condition: service_healthy
+
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command:
+      [
+        "sh",
+        "-c",
+        "node -e \"const net=require('node:net');let tries=30;function wait(){const s=net.connect({host:'database',port:5432});s.once('connect',()=>{s.end();console.log('Database TCP connection ready')});s.once('error',()=>{s.destroy();tries--;if(!tries){console.error('Database did not become reachable');process.exit(1)}setTimeout(wait,1000)})}wait()\" && npm run db:deploy && npm run start:dev",
+      ]
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: dockerfile
+
+    container_name: coolsense-frontend
+    restart: unless-stopped
+
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+
+    environment:
+      VITE_PROXY_TARGET: http://backend:3000
+
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  coolsense_postgres_data:

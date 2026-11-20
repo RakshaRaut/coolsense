@@ -17,7 +17,7 @@ import type { FleetPoint } from '@/api/dashboard.api'
 export type TimeRange = (typeof TIME_RANGES)[number]['value']
 
 interface TemperatureChartProps {
-  data: FleetPoint[]
+  data: Array<Pick<FleetPoint, 'time' | 'roomTempC' | 'targetTempC' | 'outsideTempC'>>
   height?: number
   range?: TimeRange
   onRangeChange?: (range: TimeRange) => void
