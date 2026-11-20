@@ -163,4 +163,23 @@ describe('AcControlController', () => {
     expect(service.setMode).toHaveBeenCalledTimes(5);
     expect(service.setFanSpeed).toHaveBeenCalledTimes(5);
   });
+
+  it('accepts lowercase mode and fan speed like the combined command', async () => {
+    await request(app.getHttpServer())
+      .patch(`/api/v1/ac-control/${deviceId}/mode`)
+      .send({ mode: 'cool' })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/ac-control/${deviceId}/fan-speed`)
+      .send({ fanSpeed: 'low' })
+      .expect(200);
+
+    expect(service.setMode).toHaveBeenCalledWith(deviceId, 'owner-1', {
+      mode: 'COOL',
+    });
+    expect(service.setFanSpeed).toHaveBeenCalledWith(deviceId, 'owner-1', {
+      fanSpeed: 'LOW',
+    });
+  });
 });
