@@ -56,11 +56,21 @@ export class AnalyticsService {
     return date;
   }
 
-  // Fetch telemetry and include the last reading before the start date.
-  private async getTelemetry(
+  // Calculate the increase in cumulative energy between readings.
+  private getEnergyIncrement(previous: number, current: number): number {
+    // If the simulation energy counter resets, treat the current
+    // reading as consumption since that reset.
+    return current >= previous ? current - previous : current;
+  }
+
+  // Sum energy increments per period in Postgres. The last reading before
+  // the range is the baseline for the first sample. A null format gives
+  // one period covering the whole range.
+  private async getEnergyTotals(
     deviceId: string,
     ownerId: string,
     range: DateRange,
+    format: 'YYYY-MM-DD' | 'YYYY-MM' | null,
   ) {
     await this.devices.findOwnedDevice(deviceId, ownerId);
 
@@ -70,59 +80,38 @@ export class AnalyticsService {
         timestamp: { lt: range.start },
       },
       orderBy: { timestamp: 'desc' },
+      select: { energyKwh: true },
     });
 
-    const samples = await this.prisma.telemetry.findMany({
-      where: {
-        deviceId,
-        timestamp: {
-          gte: range.start,
-          lte: range.end,
-        },
-      },
-      orderBy: { timestamp: 'asc' },
-    });
+    // Same reset rule as getEnergyIncrement; SUM ... ORDER BY keeps the
+    // float addition order of the previous in-memory loop.
+    const totals = await this.prisma.$queryRaw<
+      Array<{ period: string | null; energyKwh: number }>
+    >`
+      SELECT to_char("timestamp", ${format}::text) AS period,
+             SUM(
+               CASE WHEN "energyKwh" >= previous
+                 THEN "energyKwh" - previous
+                 ELSE "energyKwh"
+               END
+               ORDER BY "timestamp"
+             ) AS "energyKwh"
+      FROM (
+        SELECT "timestamp",
+               "energyKwh",
+               LAG("energyKwh", 1, ${baseline?.energyKwh ?? null}::double precision)
+                 OVER (ORDER BY "timestamp") AS previous
+        FROM "Telemetry"
+        WHERE "deviceId" = ${deviceId}
+          AND "timestamp" >= ${range.start}
+          AND "timestamp" <= ${range.end}
+      ) samples
+      WHERE previous IS NOT NULL
+      GROUP BY period
+      ORDER BY period
+    `;
 
-    return {
-      baseline,
-      samples,
-    };
-  }
-
-  // Calculate the increase in cumulative energy between readings.
-  private getEnergyIncrement(previous: number, current: number): number {
-    // If the simulation energy counter resets, treat the current
-    // reading as consumption since that reset.
-    return current >= previous ? current - previous : current;
-  }
-
-  // Build energy increments from consecutive cumulative readings.
-  private getEnergyIncrements(
-    baseline: { energyKwh: number } | null,
-    samples: Array<{ timestamp: Date; energyKwh: number }>,
-  ) {
-    const increments: Array<{
-      timestamp: Date;
-      energyKwh: number;
-    }> = [];
-
-    let previousEnergy = baseline?.energyKwh;
-
-    for (const sample of samples) {
-      if (previousEnergy !== undefined) {
-        increments.push({
-          timestamp: sample.timestamp,
-          energyKwh: this.getEnergyIncrement(
-            previousEnergy,
-            sample.energyKwh,
-          ),
-        });
-      }
-
-      previousEnergy = sample.energyKwh;
-    }
-
-    return increments;
+    return { baselineAvailable: baseline !== null, totals };
   }
 
   // DAILY ENERGY
@@ -132,34 +121,21 @@ export class AnalyticsService {
     query: AnalyticsQuery,
   ) {
     const range = this.getDateRange(query, 7);
-    const { baseline, samples } = await this.getTelemetry(
+    const { baselineAvailable, totals } = await this.getEnergyTotals(
       deviceId,
       ownerId,
       range,
+      'YYYY-MM-DD',
     );
-
-    const increments = this.getEnergyIncrements(baseline, samples);
-    const dailyTotals = new Map<string, number>();
-
-    for (const item of increments) {
-      const date = item.timestamp.toISOString().slice(0, 10);
-
-      dailyTotals.set(
-        date,
-        (dailyTotals.get(date) ?? 0) + item.energyKwh,
-      );
-    }
 
     return {
       deviceId,
       unit: 'kWh',
-      baselineAvailable: baseline !== null,
-      data: Array.from(dailyTotals.entries()).map(
-        ([date, energyKwh]) => ({
-          date,
-          energyKwh: Number(energyKwh.toFixed(6)),
-        }),
-      ),
+      baselineAvailable,
+      data: totals.map(({ period, energyKwh }) => ({
+        date: period,
+        energyKwh: Number(energyKwh.toFixed(6)),
+      })),
     };
   }
 
@@ -170,34 +146,21 @@ export class AnalyticsService {
     query: AnalyticsQuery,
   ) {
     const range = this.getDateRange(query, 365);
-    const { baseline, samples } = await this.getTelemetry(
+    const { baselineAvailable, totals } = await this.getEnergyTotals(
       deviceId,
       ownerId,
       range,
+      'YYYY-MM',
     );
-
-    const increments = this.getEnergyIncrements(baseline, samples);
-    const monthlyTotals = new Map<string, number>();
-
-    for (const item of increments) {
-      const month = item.timestamp.toISOString().slice(0, 7);
-
-      monthlyTotals.set(
-        month,
-        (monthlyTotals.get(month) ?? 0) + item.energyKwh,
-      );
-    }
 
     return {
       deviceId,
       unit: 'kWh',
-      baselineAvailable: baseline !== null,
-      data: Array.from(monthlyTotals.entries()).map(
-        ([month, energyKwh]) => ({
-          month,
-          energyKwh: Number(energyKwh.toFixed(6)),
-        }),
-      ),
+      baselineAvailable,
+      data: totals.map(({ period, energyKwh }) => ({
+        month: period,
+        energyKwh: Number(energyKwh.toFixed(6)),
+      })),
     };
   }
 
@@ -209,11 +172,27 @@ export class AnalyticsService {
   ) {
     const range = this.getDateRange(query, 1);
 
-    const { samples } = await this.getTelemetry(
+    await this.devices.findOwnedDevice(deviceId, ownerId);
+
+    const where = {
       deviceId,
-      ownerId,
-      range,
-    );
+      timestamp: {
+        gte: range.start,
+        lte: range.end,
+      },
+    };
+
+    // The response lists every sample, so load only the columns it returns.
+    const samples = await this.prisma.telemetry.findMany({
+      where,
+      orderBy: { timestamp: 'asc' },
+      select: {
+        timestamp: true,
+        roomTemperature: true,
+        targetTemperature: true,
+        outsideTemperature: true,
+      },
+    });
 
     if (samples.length === 0) {
       return {
@@ -224,23 +203,30 @@ export class AnalyticsService {
       };
     }
 
-    const temperatures = samples.map(
-      (sample) => sample.roomTemperature,
-    );
+    const [statistics] = await this.prisma.$queryRaw<
+      Array<{ minimum: number; maximum: number; total: number; count: number }>
+    >`
+      SELECT MIN("roomTemperature") AS minimum,
+             MAX("roomTemperature") AS maximum,
+             SUM("roomTemperature" ORDER BY "timestamp") AS total,
+             COUNT(*)::int AS count
+      FROM "Telemetry"
+      WHERE "deviceId" = ${deviceId}
+        AND "timestamp" >= ${range.start}
+        AND "timestamp" <= ${range.end}
+    `;
 
-    const average =
-      temperatures.reduce((sum, value) => sum + value, 0) /
-      temperatures.length;
+    const average = statistics.total / statistics.count;
 
     return {
       deviceId,
       count: samples.length,
       unit: '°C',
       statistics: {
-        minimum: Math.min(...temperatures),
-        maximum: Math.max(...temperatures),
+        minimum: statistics.minimum,
+        maximum: statistics.maximum,
         average: Number(average.toFixed(2)),
-        latest: temperatures[temperatures.length - 1],
+        latest: samples[samples.length - 1].roomTemperature,
       },
       data: samples.map((sample) => ({
         timestamp: sample.timestamp,
@@ -259,28 +245,36 @@ export class AnalyticsService {
   ) {
     const range = this.getDateRange(query, 1);
 
-    const { baseline, samples } = await this.getTelemetry(
+    await this.devices.findOwnedDevice(deviceId, ownerId);
+
+    const cooling = {
       deviceId,
-      ownerId,
-      range,
-    );
+      timestamp: {
+        gte: range.start,
+        lte: range.end,
+      },
+      compressorState: true,
+      operatingMode: 'COOL',
+    };
 
-    const coolingSamples = samples.filter(
-      (sample) =>
-        sample.compressorState &&
-        sample.operatingMode === 'COOL',
-    );
+    const [first, last] = await Promise.all([
+      this.prisma.telemetry.findFirst({
+        where: cooling,
+        orderBy: { timestamp: 'asc' },
+      }),
+      this.prisma.telemetry.findFirst({
+        where: cooling,
+        orderBy: { timestamp: 'desc' },
+      }),
+    ]);
 
-    if (coolingSamples.length === 0) {
+    if (!first || !last) {
       return {
         deviceId,
         coolingActive: false,
         message: 'No active cooling data found for this period',
       };
     }
-
-    const first = coolingSamples[0];
-    const last = coolingSamples[coolingSamples.length - 1];
 
     const temperatureReduction =
       first.roomTemperature - last.roomTemperature;
@@ -289,12 +283,15 @@ export class AnalyticsService {
       (last.timestamp.getTime() - first.timestamp.getTime()) /
       60000;
 
-    const previousSample =
-   [...samples]
-     .reverse()
-     .find(
-       (sample) => sample.timestamp < first.timestamp,
-     ) ?? baseline;
+    // Last reading before cooling started, inside or before the range.
+    const previousSample = await this.prisma.telemetry.findFirst({
+      where: {
+        deviceId,
+        timestamp: { lt: first.timestamp },
+      },
+      orderBy: { timestamp: 'desc' },
+      select: { energyKwh: true },
+    });
 
     const energyConsumed = previousSample
       ? this.getEnergyIncrement(
@@ -343,21 +340,14 @@ export class AnalyticsService {
   ) {
     const range = this.getDateRange(query, 30);
 
-    const { baseline, samples } = await this.getTelemetry(
+    const { baselineAvailable, totals } = await this.getEnergyTotals(
       deviceId,
       ownerId,
       range,
+      null,
     );
 
-    const increments = this.getEnergyIncrements(
-      baseline,
-      samples,
-    );
-
-    const energyConsumed = increments.reduce(
-      (total, item) => total + item.energyKwh,
-      0,
-    );
+    const energyConsumed = totals[0]?.energyKwh ?? 0;
 
     const rate = Number(
       this.config.get<string>(
@@ -382,7 +372,7 @@ export class AnalyticsService {
       estimatedCost: Number(
         (energyConsumed * rate).toFixed(2),
       ),
-      baselineAvailable: baseline !== null,
+      baselineAvailable,
     };
   }
 }
