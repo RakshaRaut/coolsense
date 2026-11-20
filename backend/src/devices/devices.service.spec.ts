@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { DevicesService } from './devices.service.js';
 import { ThingsboardService } from '../thingsboard/thingsboard.service.js';
 import { SimulationGateway } from '../simulation/simulation.gateway.js';
+import { ActivityService } from '../activity/activity.service.js';
 
 describe('DevicesService', () => {
   let service: DevicesService;
@@ -23,8 +24,8 @@ describe('DevicesService', () => {
   const gateway = {
     publishDeviceUpdated: vi.fn(),
     publishDeviceDeleted: vi.fn(),
-    publishActivity: vi.fn(),
   };
+  const activities = { record: vi.fn() };
 
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -35,6 +36,7 @@ describe('DevicesService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: ThingsboardService, useValue: thingsboard },
         { provide: SimulationGateway, useValue: gateway },
+        { provide: ActivityService, useValue: activities },
       ],
     }).compile();
 
@@ -200,20 +202,18 @@ describe('DevicesService', () => {
 
     expect(gateway.publishDeviceUpdated).toHaveBeenNthCalledWith(1, 'user-1', device);
     expect(gateway.publishDeviceUpdated).toHaveBeenNthCalledWith(2, 'user-1', updated);
-    expect(gateway.publishActivity).toHaveBeenNthCalledWith(
-      1,
-      'user-1',
-      'device',
-      'Device "Living room" registered',
-      device,
-    );
-    expect(gateway.publishActivity).toHaveBeenNthCalledWith(
-      2,
-      'user-1',
-      'device',
-      'Configuration updated for "Living room"',
-      updated,
-    );
+    expect(activities.record).toHaveBeenNthCalledWith(1, 'user-1', {
+      kind: 'device',
+      message: 'Device "Living room" registered',
+      deviceId: 'device-1',
+      deviceName: 'Living room',
+    });
+    expect(activities.record).toHaveBeenNthCalledWith(2, 'user-1', {
+      kind: 'device',
+      message: 'Configuration updated for "Living room"',
+      deviceId: 'device-1',
+      deviceName: 'Living room',
+    });
   });
 
   it('pushes device:deleted and an activity only after an owned delete', async () => {
@@ -224,12 +224,12 @@ describe('DevicesService', () => {
     await service.deleteOwnedDevice('device-1', 'user-1');
 
     expect(gateway.publishDeviceDeleted).toHaveBeenCalledWith('user-1', 'device-1');
-    expect(gateway.publishActivity).toHaveBeenCalledWith(
-      'user-1',
-      'device',
-      'Device "Living room" removed',
-      device,
-    );
+    expect(activities.record).toHaveBeenCalledWith('user-1', {
+      kind: 'device',
+      message: 'Device "Living room" removed',
+      deviceId: 'device-1',
+      deviceName: 'Living room',
+    });
 
     prisma.device.findFirst.mockResolvedValueOnce(null);
     await expect(

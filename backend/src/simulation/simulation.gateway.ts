@@ -10,12 +10,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { randomUUID } from 'node:crypto';
 import type { Socket, Server } from 'socket.io';
 import type { Device } from '@prisma/client';
 import type { SimulationState } from './models/simulation-state.model.js';
 import type { ThingsboardIntegrationStatus } from '../thingsboard/thingsboard.service.js';
 import { allowedOrigins } from '../common/allowed-origins.js';
+import type {
+  ActivityKind,
+  ActivityPayload,
+  ActivityService,
+} from '../activity/activity.service.js';
 
 interface SimulationSessionPayload {
   id: string;
@@ -26,8 +30,6 @@ interface SimulationSessionPayload {
   simulatedTime: string;
   startedAt: string | null;
 }
-
-type ActivityKind = 'power' | 'target' | 'mode' | 'device' | 'simulation' | 'sync';
 
 interface JwtSocketPayload {
   sub: string;
@@ -54,6 +56,9 @@ export class SimulationGateway
 
   @WebSocketServer()
   private server?: Server;
+
+  /** Set by ActivityService (it depends on this gateway, so it cannot be injected here). */
+  activities?: Pick<ActivityService, 'record'>;
 
   constructor(private readonly jwtService: JwtService) {}
 
@@ -103,9 +108,7 @@ export class SimulationGateway
     const payload = this.toPayload(session, state);
     this.emitToOwner(ownerId, `simulation.${event}`, payload);
     this.publishDeviceStatus(ownerId, session.deviceId, state);
-    this.publishActivity(ownerId, 'simulation', `Simulation ${event}`, {
-      id: session.deviceId,
-    });
+    this.recordActivity(ownerId, 'simulation', `Simulation ${event}`, session.deviceId);
 
     const legacyEvent = {
       started: 'simulation:started',
@@ -192,18 +195,17 @@ export class SimulationGateway
     if (!success) {
       return;
     }
-    const device = { id: deviceId };
     if (command.acPower !== undefined) {
-      this.publishActivity(ownerId, 'power', `AC turned ${command.acPower ? 'on' : 'off'}`, device);
+      this.recordActivity(ownerId, 'power', `AC turned ${command.acPower ? 'on' : 'off'}`, deviceId);
     }
     if (command.targetTemperature !== undefined) {
-      this.publishActivity(ownerId, 'target', `Target temperature set to ${command.targetTemperature.toFixed(1)} °C`, device);
+      this.recordActivity(ownerId, 'target', `Target temperature set to ${command.targetTemperature.toFixed(1)} °C`, deviceId);
     }
     if (command.operatingMode !== undefined) {
-      this.publishActivity(ownerId, 'mode', `Operating mode changed to ${command.operatingMode.toLowerCase()}`, device);
+      this.recordActivity(ownerId, 'mode', `Operating mode changed to ${command.operatingMode.toLowerCase()}`, deviceId);
     }
     if (command.fanSpeed !== undefined) {
-      this.publishActivity(ownerId, 'mode', `Fan speed changed to ${command.fanSpeed.toLowerCase()}`, device);
+      this.recordActivity(ownerId, 'mode', `Fan speed changed to ${command.fanSpeed.toLowerCase()}`, deviceId);
     }
   }
 
@@ -242,20 +244,9 @@ export class SimulationGateway
     });
   }
 
-  publishActivity(
-    ownerId: string,
-    kind: ActivityKind,
-    message: string,
-    device?: { id: string; name?: string },
-  ): void {
-    this.emitToOwner(ownerId, 'activity:new', {
-      id: randomUUID(),
-      kind,
-      message,
-      ...(device ? { deviceId: device.id } : {}),
-      ...(device?.name ? { deviceName: device.name } : {}),
-      at: new Date().toISOString(),
-    });
+  /** Called by ActivityService after persisting, so live and REST activities share ids. */
+  publishActivity(ownerId: string, activity: ActivityPayload): void {
+    this.emitToOwner(ownerId, 'activity:new', activity);
   }
 
   publishThingsboardStatus(
@@ -263,6 +254,15 @@ export class SimulationGateway
     status: ThingsboardIntegrationStatus,
   ): void {
     this.emitToOwner(ownerId, 'thingsboard:status', status);
+  }
+
+  private recordActivity(
+    ownerId: string,
+    kind: ActivityKind,
+    message: string,
+    deviceId: string,
+  ): void {
+    void this.activities?.record(ownerId, { kind, message, deviceId });
   }
 
   private toPayload(

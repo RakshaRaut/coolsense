@@ -16,6 +16,7 @@ import {
 } from './dto/telemetry-query.dto.js';
 import { ThingsboardService } from '../thingsboard/thingsboard.service.js';
 import { SimulationGateway } from '../simulation/simulation.gateway.js';
+import { ActivityService } from '../activity/activity.service.js';
 
 @Injectable()
 export class DevicesService implements OnModuleInit, OnModuleDestroy {
@@ -29,6 +30,7 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly thingsboard: ThingsboardService,
     private readonly gateway: SimulationGateway,
+    private readonly activities: ActivityService,
   ) {}
 
   onModuleInit(): void {
@@ -74,12 +76,12 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
       },
     });
     this.gateway.publishDeviceUpdated(ownerId, device);
-    this.gateway.publishActivity(
-      ownerId,
-      'device',
-      `Device "${device.name}" registered`,
-      device,
-    );
+    void this.activities.record(ownerId, {
+      kind: 'device',
+      message: `Device "${device.name}" registered`,
+      deviceId: device.id,
+      deviceName: device.name,
+    });
 
     if (!this.thingsboard.isEnabled()) {
       return device;
@@ -210,12 +212,12 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
     }
     this.clearThingsboardRetry(deviceId);
     this.gateway.publishDeviceDeleted(ownerId, deviceId);
-    this.gateway.publishActivity(
-      ownerId,
-      'device',
-      `Device "${device.name}" removed`,
-      device,
-    );
+    void this.activities.record(ownerId, {
+      kind: 'device',
+      message: `Device "${device.name}" removed`,
+      deviceId: device.id,
+      deviceName: device.name,
+    });
   }
 
   async updateOwnedDevice(
@@ -241,12 +243,12 @@ export class DevicesService implements OnModuleInit, OnModuleDestroy {
       },
     });
     this.gateway.publishDeviceUpdated(ownerId, updated);
-    this.gateway.publishActivity(
-      ownerId,
-      'device',
-      `Configuration updated for "${updated.name}"`,
-      updated,
-    );
+    void this.activities.record(ownerId, {
+      kind: 'device',
+      message: `Configuration updated for "${updated.name}"`,
+      deviceId: updated.id,
+      deviceName: updated.name,
+    });
 
     if (!this.thingsboard.isEnabled()) {
       return updated;

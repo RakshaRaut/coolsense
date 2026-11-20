@@ -14,6 +14,7 @@ import { SimulationModule } from './simulation/simulation.module.js';
 import { TelemetryModule } from './telemetry/telemetry.module.js';
 import { AnalyticsModule } from './analytics/analytics.module.js';
 import { ThingsboardModule } from './thingsboard/thingsboard.module.js';
+import { ActivityModule } from './activity/activity.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -41,6 +42,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     TelemetryModule,
     AnalyticsModule,
     ThingsboardModule,
+    ActivityModule,
   ],
   controllers: [AppController],
   providers: [AppService],

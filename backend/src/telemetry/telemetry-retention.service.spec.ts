@@ -39,28 +39,36 @@ describe('TelemetryRetentionService', () => {
     await create('30').run(now);
 
     const cutoff = new Date('2026-10-22T12:00:00.000Z');
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(sqlOf(prisma.$executeRaw.mock.calls[2])).toContain('"Activity" WHERE "createdAt" <');
     for (const call of prisma.$executeRaw.mock.calls) {
       expect(call.slice(1)).toEqual([cutoff, RETENTION_BATCH_SIZE]);
     }
   });
 
-  it('deletes in batches until a batch is smaller than the limit, telemetry first', async () => {
+  it('deletes in batches until a batch is smaller than the limit: telemetry, snapshots, then activities', async () => {
     prisma.$executeRaw
       .mockResolvedValueOnce(RETENTION_BATCH_SIZE)
       .mockResolvedValueOnce(RETENTION_BATCH_SIZE)
       .mockResolvedValueOnce(12)
       .mockResolvedValueOnce(RETENTION_BATCH_SIZE)
-      .mockResolvedValueOnce(0);
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(RETENTION_BATCH_SIZE)
+      .mockResolvedValueOnce(7);
 
     const result = await create().run(now);
 
     expect(result).toEqual({
       telemetry: 2 * RETENTION_BATCH_SIZE + 12,
       snapshots: RETENTION_BATCH_SIZE,
+      activities: RETENTION_BATCH_SIZE + 7,
     });
     const tables = prisma.$executeRaw.mock.calls.map((call) =>
-      sqlOf(call).includes('"Telemetry"') ? 'telemetry' : 'snapshot',
+      sqlOf(call).includes('"Telemetry"')
+        ? 'telemetry'
+        : sqlOf(call).includes('"SimulationSnapshot"')
+          ? 'snapshot'
+          : 'activity',
     );
     expect(tables).toEqual([
       'telemetry',
@@ -68,6 +76,8 @@ describe('TelemetryRetentionService', () => {
       'telemetry',
       'snapshot',
       'snapshot',
+      'activity',
+      'activity',
     ]);
   });
 
@@ -82,8 +92,8 @@ describe('TelemetryRetentionService', () => {
     await expect(service.run(now)).resolves.toBeNull();
     release(0);
 
-    await expect(first).resolves.toEqual({ telemetry: 0, snapshots: 0 });
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+    await expect(first).resolves.toEqual({ telemetry: 0, snapshots: 0, activities: 0 });
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(3);
   });
 
   it('logs and swallows database errors', async () => {

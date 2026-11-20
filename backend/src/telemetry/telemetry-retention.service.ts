@@ -45,7 +45,9 @@ export class TelemetryRetentionService implements OnModuleInit, OnModuleDestroy 
   }
 
   /** Returns null when a previous run is still in progress or the run failed. */
-  async run(now = new Date()): Promise<{ telemetry: number; snapshots: number } | null> {
+  async run(
+    now = new Date(),
+  ): Promise<{ telemetry: number; snapshots: number; activities: number } | null> {
     if (this.running) {
       return null;
     }
@@ -65,12 +67,18 @@ export class TelemetryRetentionService implements OnModuleInit, OnModuleDestroy 
             SELECT ctid FROM "SimulationSnapshot" WHERE "timestamp" < ${cutoff} LIMIT ${RETENTION_BATCH_SIZE}
           )`,
       );
-      if (telemetry > 0 || snapshots > 0) {
+      const activities = await this.deleteInBatches(
+        () => this.prisma.$executeRaw`
+          DELETE FROM "Activity" WHERE ctid IN (
+            SELECT ctid FROM "Activity" WHERE "createdAt" < ${cutoff} LIMIT ${RETENTION_BATCH_SIZE}
+          )`,
+      );
+      if (telemetry > 0 || snapshots > 0 || activities > 0) {
         this.logger.log(
-          `Retention removed ${telemetry} telemetry and ${snapshots} snapshot rows older than ${cutoff.toISOString()}`,
+          `Retention removed ${telemetry} telemetry, ${snapshots} snapshot and ${activities} activity rows older than ${cutoff.toISOString()}`,
         );
       }
-      return { telemetry, snapshots };
+      return { telemetry, snapshots, activities };
     } catch (error) {
       this.logger.error(
         `Retention run failed: ${error instanceof Error ? error.message : String(error)}`,

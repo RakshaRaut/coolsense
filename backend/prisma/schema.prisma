@@ -15,6 +15,7 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   devices      Device[]
+  activities   Activity[]
 }
 
 model Device {
@@ -117,4 +118,20 @@ model SimulationSnapshot {
   @@index([simulationId, timestamp])
   // Retention deletes by age across all simulations.
   @@index([timestamp])
+}
+
+model Activity {
+  id         String   @id @default(uuid())
+  userId     String
+  kind       String
+  message    String
+  // No FK: activities outlive deleted devices.
+  deviceId   String?
+  deviceName String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  // Retention deletes by age across all users.
+  @@index([createdAt])
 }

@@ -71,7 +71,9 @@ describe('SimulationGateway', () => {
     });
     const emitted = (event: string) =>
       emit.mock.calls.filter(([name]) => name === event).map(([, payload]) => payload);
-    return { gateway, to, emit, emitted };
+    const record = vi.fn().mockResolvedValue(undefined);
+    gateway.activities = { record };
+    return { gateway, to, emit, emitted, record };
   };
 
   it('sends device and ThingsBoard events to the owner room only', () => {
@@ -82,30 +84,29 @@ describe('SimulationGateway', () => {
     gateway.publishDeviceUpdated('user-1', device);
     gateway.publishDeviceDeleted('user-1', 'device-1');
     gateway.publishThingsboardStatus('user-1', tbStatus);
-    gateway.publishActivity('user-1', 'device', 'Device "Living room" removed', device);
+    const activity = {
+      id: 'activity-1',
+      kind: 'device' as const,
+      message: 'Device "Living room" removed',
+      deviceId: 'device-1',
+      deviceName: 'Living room',
+      at: '2026-11-21T12:00:00.000Z',
+    };
+    gateway.publishActivity('user-1', activity);
 
     expect(to.mock.calls.every(([room]) => room === 'user:user-1')).toBe(true);
     expect(emitted('device:updated')).toEqual([device]);
     expect(emitted('device:deleted')).toEqual([{ id: 'device-1' }]);
     expect(emitted('thingsboard:status')).toEqual([tbStatus]);
-    expect(emitted('activity:new')).toEqual([
-      {
-        id: expect.any(String),
-        kind: 'device',
-        message: 'Device "Living room" removed',
-        deviceId: 'device-1',
-        deviceName: 'Living room',
-        at: expect.any(String),
-      },
-    ]);
+    expect(emitted('activity:new')).toEqual([activity]);
   });
 
-  it('emits device:status and an activity on lifecycle changes but not on ticks', () => {
-    const { gateway, emitted } = connectedGateway();
+  it('emits device:status and records an activity on lifecycle changes but not on ticks', () => {
+    const { gateway, emitted, record } = connectedGateway();
 
     gateway.publishState(session, state, 'user-1');
     expect(emitted('device:status')).toEqual([]);
-    expect(emitted('activity:new')).toEqual([]);
+    expect(record).not.toHaveBeenCalled();
 
     gateway.publishLifecycle('stopped', session, state, 'user-1');
     expect(emitted('device:status')).toEqual([
@@ -129,20 +130,18 @@ describe('SimulationGateway', () => {
         },
       },
     ]);
-    expect(emitted('activity:new')).toEqual([
-      expect.objectContaining({
-        kind: 'simulation',
-        message: 'Simulation stopped',
-        deviceId: 'device-1',
-      }),
-    ]);
+    expect(record).toHaveBeenCalledWith('user-1', {
+      kind: 'simulation',
+      message: 'Simulation stopped',
+      deviceId: 'device-1',
+    });
   });
 
   it('turns successful AC commands into device:status and activities, failures into neither', () => {
-    const { gateway, emitted } = connectedGateway();
+    const { gateway, emitted, record } = connectedGateway();
 
     gateway.publishCommandStatus('user-1', 'device-1', false, { acPower: true }, 'nope');
-    expect(emitted('activity:new')).toEqual([]);
+    expect(record).not.toHaveBeenCalled();
 
     gateway.publishAcState('user-1', 'device-1', { ...state, acPower: false });
     gateway.publishCommandStatus('user-1', 'device-1', true, {
@@ -154,15 +153,10 @@ describe('SimulationGateway', () => {
     expect(emitted('device:status')).toEqual([
       { deviceId: 'device-1', state: expect.objectContaining({ power: false }) },
     ]);
-    expect(
-      emitted('activity:new').map((activity) => {
-        const { kind, message, deviceId } = activity as Record<string, unknown>;
-        return { kind, message, deviceId };
-      }),
-    ).toEqual([
-      { kind: 'power', message: 'AC turned off', deviceId: 'device-1' },
-      { kind: 'target', message: 'Target temperature set to 22.0 °C', deviceId: 'device-1' },
-      { kind: 'mode', message: 'Operating mode changed to heat', deviceId: 'device-1' },
+    expect(record.mock.calls).toEqual([
+      ['user-1', { kind: 'power', message: 'AC turned off', deviceId: 'device-1' }],
+      ['user-1', { kind: 'target', message: 'Target temperature set to 22.0 °C', deviceId: 'device-1' }],
+      ['user-1', { kind: 'mode', message: 'Operating mode changed to heat', deviceId: 'device-1' }],
     ]);
   });
 
