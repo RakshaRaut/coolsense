@@ -1,58 +1,250 @@
 # CoolSense
 
-## Run the full stack with Docker Compose
+**Smart AC Monitoring, Control, and Software Simulation Platform**
 
-1. Copy `.env.example` to `.env` in the repository root and set a private
-   `JWT_SECRET`.
-2. Set `THINGSBOARD_ENABLED=true` and provide tenant-admin credentials when
-   ThingsBoard synchronization is required. `THINGSBOARD_DOCKER_URL` must be
-   reachable from the backend container; use `host.docker.internal` for an
-   installation on the Docker host or a Compose service name for a container.
-3. Start the stack in the foreground, and press Ctrl+C to stop it:
+CoolSense is a full-stack HVAC application for managing virtual AC devices,
+running room simulations, monitoring telemetry, and viewing energy analytics.
+It is **100% software-only**; no physical hardware is required.
 
-   ```sh
-   ./run.sh
-   ```
+## Table of Contents
 
-   If the terminal was closed without a clean stop, run `./stop.sh`. Nothing
-   restarts on its own: the services have no restart policy.
+- [Overview](#overview)
+- [Features and Status](#features-and-status)
+- [Technology Stack](#technology-stack)
+- [Architecture](#architecture)
+- [Directory Structure](#directory-structure)
+- [Setup](#setup)
+- [Environment Variables](#environment-variables)
+- [API Endpoints](#api-endpoints)
+- [WebSocket Events](#websocket-events)
+- [Simulation Logic](#simulation-logic)
+- [Testing](#testing)
+- [Docker Deployment](#docker-deployment)
+- [Troubleshooting](#troubleshooting)
+- [Future Improvements](#future-improvements)
 
-When `THINGSBOARD_ENABLED=true`, `run.sh` also starts ThingsBoard and its
-database from `~/Desktop/pulseGrid` (HTTP on 18080, MQTT on 11883).
-`thingsboard.override.yml` caps the JVM heap at 768 MB. `stop.sh` stops
-ThingsBoard too, including when pulseGrid itself is using it.
+## Overview
 
-The backend hot-reloads from the mounted `backend/src` and `backend/prisma`.
-The frontend container serves a production build, which `run.sh` rebuilds on
-each start. For frontend hot reload, run `npm run dev` in `frontend/` on the
-host (Node 22). It proxies `/api` and `/socket.io` to `localhost:3000`.
+The project provides:
 
-The backend waits for PostgreSQL, applies pending Prisma migrations with
-`prisma migrate deploy` (without resetting the database), and then starts. The
-existing `coolsense_postgres_data` volume is retained. The API is available at
-`http://localhost:3000/api/v1`, the frontend at `http://localhost:5173`, and
-PostgreSQL at `localhost:5434` by default.
-If the frontend or backend host port is already in use, set `FRONTEND_PORT` or
-`BACKEND_PORT` in `.env` before starting. Also update `FRONTEND_URL` to match a
-non-default frontend port so Socket.IO CORS allows the browser origin.
+- JWT-based user accounts
+- Virtual AC device configuration and control
+- Software simulation of room temperature and humidity
+- Live state updates with Socket.IO
+- Telemetry storage and historical analytics
+- Optional ThingsBoard synchronization
+- PostgreSQL persistence with automatic retention
 
-To check PostgreSQL readiness and migration state:
+## Features and Status
 
-```sh
+| Status | Features |
+| --- | --- |
+| Implemented | Registration/login, devices, AC controls, thermostat simulation, telemetry, analytics, activity history, REST APIs, Socket.IO, and Docker startup |
+| Partial | ThingsBoard synchronization; requires an external ThingsBoard installation and tenant-administrator credentials |
+| Partial | In-browser mock mode using `VITE_USE_MOCK=true`; separate from the normal backend transport |
+| Partial | NestJS Observe instrumentation; requires Observe app credentials |
+| Proposed | CI/CD, refresh-token rotation, real production hardware protocols, and Swagger publication |
+
+## Technology Stack
+
+- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS, React Router,
+  TanStack Query, Axios, Recharts, Socket.IO Client
+- **Backend:** NestJS 12, TypeScript, Passport/JWT, Socket.IO
+- **Database:** PostgreSQL 16 and Prisma 7
+- **Testing:** Vitest, Supertest, Oxlint
+- **Infrastructure:** Docker, Docker Compose, Node.js 22
+- **Optional integration:** ThingsBoard REST API
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser["React frontend"]
+    API["NestJS REST API\n/api/v1"]
+    WS["JWT-authenticated Socket.IO"]
+    Engine["Simulation engine"]
+    DB[("PostgreSQL")]
+    TB["Optional ThingsBoard"]
+
+    Browser --> API
+    Browser <-->|Live updates| WS
+    API --> Engine
+    Engine --> DB
+    API --> DB
+    API -.-> TB
+```
+
+## Directory Structure
+
+```text
+coolsense/
+├── backend/
+│   ├── prisma/              # Schema and migrations
+│   ├── src/
+│   │   ├── ac-control/      # AC commands
+│   │   ├── activity/        # Activity feed
+│   │   ├── analytics/       # Energy and temperature analytics
+│   │   ├── auth/            # Registration, login, JWT
+│   │   ├── devices/         # Device CRUD
+│   │   ├── simulation/      # Engine, scheduler, lifecycle
+│   │   ├── telemetry/       # Telemetry and retention
+│   │   ├── thingsboard/     # Optional external integration
+│   │   └── users/
+│   └── test/
+├── frontend/
+│   └── src/
+│       ├── api/
+│       ├── components/
+│       ├── contexts/
+│       ├── pages/
+│       ├── services/
+│       └── types/
+├── docker-compose.yml
+├── .env.example
+├── run.sh
+├── stop.sh
+└── thingsboard.override.yml
+```
+
+## Setup
+
+### Prerequisites
+
+- Ubuntu/Linux with Bash
+- Docker Engine and Docker Compose
+- Node.js 22 and npm for local development
+
+### Docker quick start
+
+```bash
+cp .env.example .env
+# Set a private JWT_SECRET in .env
+./run.sh
+```
+
+Open:
+
+- Frontend: `http://localhost:5173`
+- API: `http://localhost:3000/api/v1`
+- Health: `http://localhost:3000/api/v1/health`
+- PostgreSQL: `localhost:5434`
+
+Stop without deleting database data:
+
+```bash
+./stop.sh
+```
+
+### Local development
+
+```bash
+cp .env.example .env
+docker compose up -d database
+
+cd backend
+npm ci
+npm run db:deploy
+npm run start:dev
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+The backend runs on port `3000`; the Vite frontend runs on port `5173`.
+
+### Prisma migrations
+
+```bash
+cd backend
+npm run db:deploy                 # Apply migrations
+npm run db:migrate                # Create a development migration
+npm run db:generate               # Regenerate Prisma client
+```
+
+
+## Testing
+
+Backend:
+
+```bash
+cd backend
+npm test
+npm run test:e2e
+npm run test:cov
+npm run lint
+npm run build
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm run lint
+npm run build
+npm run preview
+```
+
+The frontend package does not define a `test` script or contain a frontend test
+suite.
+
+## Docker Deployment
+
+Compose starts PostgreSQL, the NestJS backend, and the production-built
+frontend:
+
+```bash
+cp .env.example .env
+./run.sh
+```
+
+Database migrations run automatically on backend startup. PostgreSQL data is
+kept in the `coolsense_postgres_data` volume.
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs backend
 docker compose exec database pg_isready
 docker compose exec backend npm run db:deploy
 ```
 
-Do not use `docker compose down -v` if you want to keep PostgreSQL data.
+Do not run `docker compose down -v` unless intentionally deleting PostgreSQL
+data.
 
-## Run locally
+For ThingsBoard, set `THINGSBOARD_ENABLED=true` and provide tenant credentials.
+`run.sh` expects an existing `~/Desktop/pulseGrid` Compose deployment.
 
-1. Copy `.env.example` to `.env` and set `JWT_SECRET`.
-2. Start PostgreSQL with `docker compose up -d database`.
-3. From `backend/`, install dependencies, apply migrations, and start the API:
+## Troubleshooting
 
-   ```sh
-   npm ci
-   npm run db:deploy
-   npm run start:dev
-   ```
+- **Missing `.env`:** copy `.env.example` and set `JWT_SECRET`.
+- **Port conflict:** change `BACKEND_PORT` or `FRONTEND_PORT`, and update
+  `FRONTEND_URL` for a new frontend origin.
+- **Socket.IO rejected:** confirm the JWT is supplied and the frontend origin
+  is allowed.
+- **PostgreSQL unavailable:** run `docker compose ps`, inspect
+  `docker compose logs database`, and check `pg_isready`.
+- **Migration failure:** run `docker compose exec backend npm run db:deploy`
+  and inspect backend logs.
+- **ThingsBoard failure:** verify the enabled flag, credentials, URL
+  reachability, and tenant permissions.
+
+## Future Improvements
+
+Proposed, not implemented:
+
+- Frontend unit and end-to-end testing
+- CI/CD workflows
+- Swagger/OpenAPI documentation
+- Refresh-token rotation
+- Role-based authorization
+- Real COP-based HVAC efficiency
+- Configurable currency and units
+- Production alerting and observability dashboards
+- Production secret management and TLS
+- Expanded ThingsBoard MQTT and bidirectional commands
