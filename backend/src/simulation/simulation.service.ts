@@ -889,6 +889,11 @@ export class SimulationService implements OnModuleInit {
       return;
     }
     try {
+      await this.thingsboard.ensureDeviceMqttAccessToken(
+        device.id,
+        device.ownerId,
+        device.thingsboardDeviceId,
+      );
       await this.thingsboard.publishTelemetry(device.thingsboardDeviceId, {
         roomTemperature: state.roomTemperature,
         outsideTemperature: state.outsideTemperature,
@@ -919,6 +924,55 @@ export class SimulationService implements OnModuleInit {
       state,
       simulation.device.ownerId,
     );
+    void this.publishThingsboardLifecycle(
+      event,
+      simulation.device,
+      state,
+    );
+  }
+
+  private async publishThingsboardLifecycle(
+    event: 'started' | 'paused' | 'resumed' | 'stopped' | 'reset',
+    device: Device,
+    state: SimulationState,
+  ): Promise<void> {
+    if (
+      typeof this.thingsboard.isEnabled !== 'function' ||
+      !this.thingsboard.isEnabled()
+    ) {
+      return;
+    }
+    if (
+      !device.thingsboardDeviceId
+    ) {
+      return;
+    }
+
+    const active = event === 'started' || event === 'resumed';
+    if (active) {
+      await this.publishThingsboardTelemetry(device, state);
+      await this.thingsboard.setDeviceActive(
+        device.thingsboardDeviceId,
+        true,
+      );
+      return;
+    }
+
+    const inactiveState: SimulationState = {
+      ...state,
+      acPower: false,
+      compressorState: false,
+      fanState: false,
+      coolingCapacity: 0,
+      heatingCapacity: 0,
+      powerWatts: 0,
+    };
+    await this.publishThingsboardTelemetry(device, inactiveState);
+    await this.thingsboard.setDeviceActive(
+      device.thingsboardDeviceId,
+      false,
+    );
+    this.thingsboard.disconnectMqttDevice(device.thingsboardDeviceId);
   }
 
   private toSession(simulation: {

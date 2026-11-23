@@ -28,6 +28,7 @@ import {
 import { getDeviceHistory } from '@/api/devices.api'
 import { sendControl } from '@/api/control.api'
 import { errorMessage } from '@/api/axios'
+import { IS_MOCK } from '@/utils/constants'
 import { socketService } from '@/services/socket'
 import { useLiveData } from '@/contexts/LiveDataProvider'
 import { useSettings } from '@/contexts/SettingsProvider'
@@ -328,7 +329,7 @@ export function SimulationPage() {
         description="Change the room, the weather and the compressor, then watch the thermodynamics unfold in real time."
         actions={
           <>
-            <DataSourceBadge source="mock" />
+            <DataSourceBadge source={IS_MOCK ? 'mock' : 'backend'} />
             <Select
               value={device.id}
               onChange={(event) => setParams({ device: event.target.value }, { replace: true })}

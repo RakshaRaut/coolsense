@@ -118,6 +118,12 @@ export class StartSimulationDto {
   @Min(16)
   @Max(30)
   roomTempC?: number;
+
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-30)
+  @Max(60)
+  outsideTempC?: number;
 }
 
 export class SimulationDeviceQueryDto {

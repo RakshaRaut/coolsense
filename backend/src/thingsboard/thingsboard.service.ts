@@ -8,6 +8,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { SimulationGateway } from '../simulation/simulation.gateway.js';
+import { connectAsync, type MqttClient } from 'mqtt';
+import { existsSync } from 'node:fs';
 
 type ThingsboardEntityRef = string | { id?: string };
 
@@ -62,7 +64,11 @@ export class ThingsboardService {
   private readonly userId?: string;
   private readonly username?: string;
   private readonly password?: string;
+  private readonly mqttHost: string;
+  private readonly mqttPort: number;
+  private readonly configuredDeviceTokens: string[];
   private readonly mqttAccessTokens = new Map<string, string>();
+  private readonly mqttClients = new Map<string, MqttClient>();
   private readonly lastSyncAt = new Map<string, string>();
   private readonly lastTelemetryAt = new Map<string, string>();
   private readonly lastStatusKey = new Map<string, string>();
@@ -95,6 +101,35 @@ export class ThingsboardService {
     this.userId = config.get<string>('THINGSBOARD_USER_ID');
     this.username = config.get<string>('THINGSBOARD_USERNAME');
     this.password = config.get<string>('THINGSBOARD_PASSWORD');
+    const configuredMqttHost = config.get<string>('THINGSBOARD_MQTT_HOST');
+    const isContainer =
+      process.platform === 'linux' && existsSync('/.dockerenv');
+    this.mqttHost =
+      isContainer &&
+      (!configuredMqttHost ||
+        configuredMqttHost === 'localhost' ||
+        configuredMqttHost === '127.0.0.1')
+        ? 'host.docker.internal'
+        : (configuredMqttHost ?? 'localhost');
+    const mqttPort = Number(
+      config.get<string>('THINGSBOARD_MQTT_PORT', '11883'),
+    );
+    this.mqttPort =
+      Number.isInteger(mqttPort) && mqttPort > 0 && mqttPort <= 65535
+        ? mqttPort
+        : 11883;
+    this.configuredDeviceTokens = [
+      (
+        config.get<string>('THINGSBOARD_DEVICE_TOKEN_1') ??
+        config.get<string>('THINGSBOARD_DEVICE_TOKEN1') ??
+        ''
+      ).trim(),
+      (
+        config.get<string>('THINGSBOARD_DEVICE_TOKEN_2') ??
+        config.get<string>('THINGSBOARD_DEVICE_TOKEN2') ??
+        ''
+      ).trim(),
+    ].filter((token) => token.length > 0);
   }
 
   isEnabled(): boolean {
@@ -282,6 +317,7 @@ export class ThingsboardService {
 
   private async cacheMqttAccessToken(
     thingsboardDeviceId: string,
+    configuredToken?: string,
   ): Promise<string> {
     const response = await this.request(
       `/api/device/${encodeURIComponent(thingsboardDeviceId)}/credentials`,
@@ -298,8 +334,22 @@ export class ThingsboardService {
         'ThingsBoard device credentials are not an access-token credential',
       );
     }
-    this.mqttAccessTokens.set(thingsboardDeviceId, credentials.credentialsId);
-    return credentials.credentialsId;
+    let credentialsId = credentials.credentialsId;
+    if (configuredToken && configuredToken !== credentialsId) {
+      await this.request(
+        `/api/device/${encodeURIComponent(thingsboardDeviceId)}/credentials`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            credentialsType: 'ACCESS_TOKEN',
+            credentialsId: configuredToken,
+          }),
+        },
+      );
+      credentialsId = configuredToken;
+    }
+    this.mqttAccessTokens.set(thingsboardDeviceId, credentialsId);
+    return credentialsId;
   }
 
   async getMqttAccessToken(deviceId: string, ownerId: string): Promise<string> {
@@ -319,7 +369,49 @@ export class ThingsboardService {
     if (cachedToken) {
       return cachedToken;
     }
-    return this.cacheMqttAccessToken(device.thingsboardDeviceId);
+    const configuredToken = await this.resolveConfiguredDeviceToken(
+      deviceId,
+      ownerId,
+    );
+    return this.cacheMqttAccessToken(
+      device.thingsboardDeviceId,
+      configuredToken,
+    );
+  }
+
+  async ensureDeviceMqttAccessToken(
+    deviceId: string,
+    ownerId: string,
+    thingsboardDeviceId: string,
+  ): Promise<string> {
+    const cachedToken = this.mqttAccessTokens.get(thingsboardDeviceId);
+    if (cachedToken) {
+      return cachedToken;
+    }
+    const configuredToken = await this.resolveConfiguredDeviceToken(
+      deviceId,
+      ownerId,
+    );
+    return this.cacheMqttAccessToken(
+      thingsboardDeviceId,
+      configuredToken,
+    );
+  }
+
+  private async resolveConfiguredDeviceToken(
+    deviceId: string,
+    ownerId: string,
+  ): Promise<string | undefined> {
+    if (this.configuredDeviceTokens.length === 0) {
+      return undefined;
+    }
+    const devices = await this.prisma.device.findMany({
+      where: { ownerId },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    const index = devices.findIndex((device) => device.id === deviceId);
+    return index >= 0 ? this.configuredDeviceTokens[index] : undefined;
   }
 
   // Publish simulated AC telemetry.
@@ -327,6 +419,25 @@ export class ThingsboardService {
     thingsboardDeviceId: string,
     telemetry: Record<string, number | boolean | string>,
   ) {
+    const mqttToken = this.mqttAccessTokens.get(thingsboardDeviceId);
+    if (mqttToken) {
+      try {
+        const client = await this.getMqttClient(
+          thingsboardDeviceId,
+          mqttToken,
+        );
+        await client.publishAsync(
+          'v1/devices/me/telemetry',
+          JSON.stringify(telemetry),
+        );
+        this.lastTelemetryAt.set(thingsboardDeviceId, new Date().toISOString());
+        return { publishedBy: 'mqtt' };
+      } catch (error) {
+        this.logger.warn(
+          `ThingsBoard MQTT publish failed for ${thingsboardDeviceId}; falling back to REST`,
+        );
+      }
+    }
     const response = await this.request(
       `/api/plugins/telemetry/DEVICE/${encodeURIComponent(thingsboardDeviceId)}/timeseries/ANY`,
       {
@@ -337,7 +448,55 @@ export class ThingsboardService {
     const text = await response.text();
     const result = text ? JSON.parse(text) : {};
     this.lastTelemetryAt.set(thingsboardDeviceId, new Date().toISOString());
-    return result;
+    return { ...result, publishedBy: 'rest' };
+  }
+
+  private async getMqttClient(
+    thingsboardDeviceId: string,
+    accessToken: string,
+  ): Promise<MqttClient> {
+    const existing = this.mqttClients.get(thingsboardDeviceId);
+    if (existing?.connected) {
+      return existing;
+    }
+    if (existing) {
+      existing.end(true);
+      this.mqttClients.delete(thingsboardDeviceId);
+    }
+
+    const client = await connectAsync(`mqtt://${this.mqttHost}:${this.mqttPort}`, {
+      username: accessToken,
+      protocolVersion: 4,
+      clientId: `coolsense-${thingsboardDeviceId}-${process.pid}`,
+      keepalive: 60,
+      reconnectPeriod: 5000,
+      connectTimeout: 10000,
+    });
+    client.on('close', () => {
+      if (this.mqttClients.get(thingsboardDeviceId) === client) {
+        this.mqttClients.delete(thingsboardDeviceId);
+      }
+    });
+    this.mqttClients.set(thingsboardDeviceId, client);
+    return client;
+  }
+
+  async setDeviceActive(
+    thingsboardDeviceId: string,
+    active: boolean,
+  ): Promise<void> {
+    await this.saveAttributes(thingsboardDeviceId, {
+      active,
+      acState: active,
+    });
+  }
+
+  disconnectMqttDevice(thingsboardDeviceId: string): void {
+    const client = this.mqttClients.get(thingsboardDeviceId);
+    if (client) {
+      client.end(true);
+      this.mqttClients.delete(thingsboardDeviceId);
+    }
   }
 
   // Retrieve latest telemetry.
@@ -420,7 +579,14 @@ export class ThingsboardService {
       roomVolume: device.roomVolume,
       targetTemperature: device.targetTemperature,
     });
-    await this.cacheMqttAccessToken(thingsboardDeviceId);
+    const configuredToken = await this.resolveConfiguredDeviceToken(
+      deviceId,
+      ownerId,
+    );
+    await this.cacheMqttAccessToken(
+      thingsboardDeviceId,
+      configuredToken,
+    );
     this.lastSyncAt.set(thingsboardDeviceId, new Date().toISOString());
     return { enabled: true, synced: true, deviceId, thingsboardDeviceId };
   }
