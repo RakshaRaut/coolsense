@@ -3,6 +3,8 @@ dist
 .git
 .env
 .env.*
+.vscode
+*.log
 !.env.example
 coverage
 npm-debug.log

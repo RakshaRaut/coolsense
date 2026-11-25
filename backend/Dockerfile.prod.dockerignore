@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.env
+.env.*
+.vscode
+*.log
+coverage
+npm-debug.log
+test
+*.tsbuildinfo

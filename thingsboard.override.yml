@@ -1,5 +1,4 @@
-# Applied by run.sh and stop.sh on top of ~/Desktop/pulseGrid/docker-compose.yml.
-# CoolSense starts only ThingsBoard and its database from that project.
+# Optional resource overrides for an externally managed ThingsBoard Compose deployment.
 services:
   thingsboard:
     restart: "no"

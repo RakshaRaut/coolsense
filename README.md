@@ -194,16 +194,18 @@ suite.
 
 ## Docker Deployment
 
-Compose starts PostgreSQL, the NestJS backend, and the production-built
-frontend:
+The existing Compose stack and `./run.sh` are for development:
 
 ```bash
 cp .env.example .env
 ./run.sh
 ```
 
-Database migrations run automatically on backend startup. PostgreSQL data is
-kept in the `coolsense_postgres_data` volume.
+The development database uses the existing `coolsense_postgres_data` Compose
+volume key (named `coolsense_coolsense_postgres_data` with the default project
+name).
+Production uses a separate Compose file, isolated volume, compiled NestJS
+build, and Nginx-served Vite build.
 
 Useful commands:
 
@@ -218,7 +220,66 @@ Do not run `docker compose down -v` unless intentionally deleting PostgreSQL
 data.
 
 For ThingsBoard, set `THINGSBOARD_ENABLED=true` and provide tenant credentials.
-`run.sh` expects an existing `~/Desktop/pulseGrid` Compose deployment.
+The development launcher does not start a ThingsBoard service; configure its
+endpoint in `.env` and manage that external service separately.
+
+### Single-EC2 production deployment
+
+The production Compose stack publishes only Nginx (port 80 by default).
+PostgreSQL and the backend stay on the private Compose network. Production
+containers have no source bind mounts, and the backend applies existing Prisma
+migrations with `prisma migrate deploy` before starting the compiled app.
+
+1. Copy the production template to a separate, ignored secrets file:
+
+   ```bash
+   cp .env.production.example .env.production
+   chmod 600 .env.production
+   ```
+
+2. Generate two independent values with `openssl rand -hex 32`. Put one in
+   `JWT_SECRET`. Put the other in `POSTGRES_PASSWORD` and use the same value in
+   `DATABASE_URL` (the hex format is URL-safe). Replace
+   `YOUR_EC2_PUBLIC_IP_OR_DOMAIN` in `FRONTEND_URL`. Do not commit
+   `.env.production`.
+
+3. Validate, build, and start the production stack:
+
+   ```bash
+   docker compose --env-file .env.production -f docker-compose.prod.yml config
+   docker compose --env-file .env.production -f docker-compose.prod.yml build
+   docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+   ```
+
+4. Check service health and the public frontend/API:
+
+   ```bash
+   docker compose --env-file .env.production -f docker-compose.prod.yml ps
+   curl -fsS http://localhost/healthz
+   curl -fsS http://localhost/api/v1/health
+   docker compose --env-file .env.production -f docker-compose.prod.yml \
+     exec database pg_isready
+   docker compose --env-file .env.production -f docker-compose.prod.yml \
+     exec backend ./node_modules/.bin/prisma migrate status
+   ```
+
+   Register/log in through `/api/v1/auth/register` and
+   `/api/v1/auth/login`; the frontend uses same-origin `/api/v1` and
+   `/socket.io` paths. Use the AC controls and simulation UI to verify live
+   telemetry. The frontend socket transport requires the `/socket.io/` Nginx
+   proxy and a valid JWT.
+
+The production database is stored in the separate
+`coolsense-prod_postgres_prod_data` volume. Container restarts and `docker compose
+down` preserve it; never use `down -v` unless you intend to delete the database.
+ThingsBoard is disabled for the initial deployment. The Compose service applies
+Prisma migrations at startup; never use `prisma migrate dev` in production.
+
+Use an HTTPS-terminating load balancer or reverse proxy before handling real
+credentials over the public internet. Restrict EC2 security-group ingress to
+the frontend (and SSH from trusted addresses); do not open PostgreSQL or the
+backend port. Check `docker stats` under representative simulations on the
+target 4 GB instance before relying on the configured container memory limits.
 
 ## Troubleshooting
 

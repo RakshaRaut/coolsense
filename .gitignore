@@ -1,5 +1,8 @@
 # Secrets: real credentials live here; copy .env.example instead
 .env
+.env.production
+.env.production.*
+!.env.production.example
 
 node_modules/
 dist/
