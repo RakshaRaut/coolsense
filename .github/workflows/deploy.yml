@@ -1,3 +1,18 @@
+name: CoolSense CI/CD
+
+on:
+  push:
+    branches:
+      - develop
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Configure SSH
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
@@ -13,8 +28,36 @@
 
           nc -vz -w 10 "$EC2_HOST" 22
 
-          echo "Retrieving EC2 SSH host key..."
+          echo "Retrieving SSH host key..."
 
           ssh-keyscan -T 10 -H "$EC2_HOST" >> ~/.ssh/known_hosts
 
           echo "SSH configuration completed!"
+
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/ec2_key \
+            -o StrictHostKeyChecking=yes \
+            "$EC2_USER@$EC2_HOST" << 'EOF'
+
+            set -e
+
+            cd /home/ubuntu/coolsense
+
+            git pull --ff-only origin develop
+
+            docker compose \
+              --env-file .env.production \
+              -f docker-compose.prod.yml \
+              up -d --build --remove-orphans
+
+            docker compose \
+              --env-file .env.production \
+              -f docker-compose.prod.yml ps
+
+            echo "Deployment completed successfully!"
+
+          EOF
