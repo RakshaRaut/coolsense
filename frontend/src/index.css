@@ -58,9 +58,9 @@
   --fg: #0f172a;
   --fg-soft: #334155;
   --muted: #64748b;
-  --accent: #0ea5e9;
-  --accent-ink: #0369a1;
-  --accent-soft: rgb(14 165 233 / 0.1);
+  --accent: #ec4899;
+  --accent-ink: #be185d;
+  --accent-soft: rgb(236 72 153 / 0.1);
   --violet: #6366f1;
   --violet-soft: rgb(99 102 241 / 0.1);
   --success: #16a34a;
@@ -69,7 +69,7 @@
   --warning-soft: rgb(217 119 6 / 0.12);
   --danger: #dc2626;
   --danger-soft: rgb(220 38 38 / 0.1);
-  --ring: rgb(14 165 233 / 0.45);
+  --ring: rgb(236 72 153 / 0.45);
   --overlay: rgb(15 23 42 / 0.42);
 }
 
@@ -86,9 +86,9 @@
   --fg: #f8fafc;
   --fg-soft: #dbe4f0;
   --muted: #94a3b8;
-  --accent: #38bdf8;
-  --accent-ink: #7dd3fc;
-  --accent-soft: rgb(56 189 248 / 0.12);
+  --accent: #f472b6;
+  --accent-ink: #f9a8d4;
+  --accent-soft: rgb(244 114 182 / 0.12);
   --violet: #818cf8;
   --violet-soft: rgb(129 140 248 / 0.14);
   --success: #22c55e;
@@ -97,7 +97,7 @@
   --warning-soft: rgb(245 158 11 / 0.14);
   --danger: #ef4444;
   --danger-soft: rgb(239 68 68 / 0.14);
-  --ring: rgb(56 189 248 / 0.5);
+  --ring: rgb(244 114 182 / 0.5);
   --overlay: rgb(3 7 18 / 0.66);
 }
 
